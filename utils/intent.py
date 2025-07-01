@@ -13,7 +13,7 @@ load_dotenv()
 
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY', None)
 if not GOOGLE_API_KEY:
-    print("NO KEY")
+    raise RuntimeError("GOOGLE_API_KEY is missing. Please set it in your environment variables.")
 
 # We Add explicit instructions and an example of the expected output format.
 data_dictionary_prefix = """
@@ -35,9 +35,9 @@ agent = create_pandas_dataframe_agent(
     prefix=data_dictionary_prefix,
     allow_dangerous_code=True,
     verbose=True,
-    # agent_executor_kwargs=dict(
-    #     handle_parsing_errors=True
-    # )
+    agent_executor_kwargs=dict(
+        handle_parsing_errors=True
+    )
 )
 
 # 2. The Formatting Chain (the "humanizer")
