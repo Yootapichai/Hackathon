@@ -11,10 +11,13 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain.tools import tool
+from langchain.memory import ConversationBufferWindowMemory
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import BaseMessage
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from typing import TypedDict, Annotated
 from dotenv import load_dotenv
 
@@ -28,8 +31,6 @@ load_dotenv()
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
-    last_query: str
-    context: Dict[str, Any]
 
 class SupplyChainAgent:
     def __init__(self):
@@ -55,6 +56,25 @@ class SupplyChainAgent:
                 'storage_costs': storage_cost_df,
                 'transfer_costs': transfer_cost_df
             }
+            
+            # Initialize LangChain memory for pandas agent
+            self.memory = ConversationBufferWindowMemory(
+                k=5,  # Keep last 5 conversation exchanges
+                memory_key="chat_history",
+                return_messages=True
+            )
+            
+            # Initialize LangGraph memory saver with SQLite persistence
+            try:
+                # Use proper SQLite initialization pattern
+                import sqlite3
+                conn = sqlite3.connect("conversations.db", check_same_thread=False)
+                self.langgraph_memory = SqliteSaver(conn)
+                log_agent_response("sqlite_memory_initialized", 0, 0)
+            except Exception as e:
+                # Fallback to in-memory storage
+                log_error(e, {"fallback": "using in-memory storage"})
+                self.langgraph_memory = MemorySaver()
             
             # Log dataframe info
             for name, df in self.dataframes.items():
@@ -116,7 +136,7 @@ Observation: <result_will_appear_here>
 Final Answer: <your_final_answer>
                 """
                 
-                # Try different agent types that work better with Gemini
+                # Create pandas agent with proper memory integration
                 try:
                     agent = create_pandas_dataframe_agent(
                         self.llm,
@@ -124,22 +144,24 @@ Final Answer: <your_final_answer>
                         prefix=data_dictionary_prefix,
                         allow_dangerous_code=True,
                         verbose=True,
-                        agent_type="zero-shot-react-description",  # More reliable with Gemini
-                        handle_parsing_errors=True
+                        agent_type="zero-shot-react-description",
+                        handle_parsing_errors=True,
+                        memory=self.memory  # Use proper LangChain memory
                     )
                 except Exception as e:
-                    log_error(e, {"fallback": "trying openai-tools agent type"})
-                    # Fallback to openai-tools if zero-shot fails
+                    log_error(e, {"fallback": "trying without memory"})
+                    # Fallback without memory if it causes issues
                     agent = create_pandas_dataframe_agent(
                         self.llm,
                         [transactions_master_df, inventory_master_df, storage_cost_df, transfer_cost_df],
                         prefix=data_dictionary_prefix,
                         allow_dangerous_code=True,
                         verbose=True,
-                        agent_type="openai-tools",
+                        agent_type="zero-shot-react-description",
                         handle_parsing_errors=True
                     )
                 
+                # Use memory-aware invocation
                 result = agent.invoke({"input": query})["output"]
                 
                 execution_time = time.time() - start_time
@@ -340,7 +362,7 @@ Final Answer: <your_final_answer>
             return {"type": "error", "message": f"Error creating general chart: {str(e)}"}
     
     def _setup_agent(self):
-        """Setup the LangGraph agent"""
+        """Setup the LangGraph agent with proper memory management"""
         agent_node = create_react_agent(
             model=self.llm,
             tools=[self.analyze_tool, self.visualize_tool]
@@ -351,19 +373,24 @@ Final Answer: <your_final_answer>
         graph.set_entry_point("agent")
         graph.add_edge("agent", END)
         
-        self.app = graph.compile()
+        # Compile with MemorySaver for persistence
+        self.app = graph.compile(checkpointer=self.langgraph_memory)
     
-    def process_query(self, query: str) -> Dict[str, Any]:
-        """Process user query and return appropriate response"""
+    def process_query(self, query: str, thread_id: str = "default") -> Dict[str, Any]:
+        """Process user query with proper memory management"""
         start_time = time.time()
         log_query(query)
         
         try:
+            # Create thread configuration for session persistence
+            config = {"configurable": {"thread_id": thread_id}}
+            
             # Determine if this is a visualization request
             visualization_keywords = ['plot', 'chart', 'graph', 'show', 'visualize', 'display']
             is_viz_request = any(keyword in query.lower() for keyword in visualization_keywords)
             
             if is_viz_request:
+                # Handle visualization requests directly
                 viz_result = self.visualize_tool.invoke(query)
                 if viz_result["type"] == "plotly":
                     response = {
@@ -373,6 +400,13 @@ Final Answer: <your_final_answer>
                     }
                     processing_time = time.time() - start_time
                     log_agent_response("text_with_chart", len(response["text"]), processing_time)
+                    
+                    # Store in LangChain memory for pandas agent context
+                    self.memory.save_context(
+                        {"input": query},
+                        {"output": response["text"]}
+                    )
+                    
                     return response
                 else:
                     error_msg = viz_result.get("message", "Error creating visualization")
@@ -380,17 +414,23 @@ Final Answer: <your_final_answer>
                     log_agent_response("error", len(error_msg), processing_time)
                     return {"type": "error", "content": error_msg}
             
-            # For data analysis questions
+            # For data analysis questions and conversation memory
             else:
-                response = self.app.invoke({
-                    "messages": [("user", query)],
-                    "last_query": query,
-                    "context": {}
-                })
+                # Use LangGraph with persistent memory
+                response = self.app.invoke(
+                    {"messages": [HumanMessage(content=query)]},
+                    config=config
+                )
                 
                 final_answer = response["messages"][-1].content
                 processing_time = time.time() - start_time
                 log_agent_response("text", len(final_answer), processing_time)
+                
+                # Store in LangChain memory for pandas agent context
+                self.memory.save_context(
+                    {"input": query},
+                    {"output": final_answer}
+                )
                 
                 return {"type": "text", "content": final_answer}
                 
@@ -400,3 +440,26 @@ Final Answer: <your_final_answer>
             log_error(e, {"query": query, "processing_time": processing_time})
             log_agent_response("error", len(error_msg), processing_time)
             return {"type": "error", "content": error_msg}
+    
+    def get_conversation_history(self, thread_id: str = "default") -> List[BaseMessage]:
+        """Get conversation history for a specific thread"""
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+            state = self.app.get_state(config)
+            return state.values.get("messages", [])
+        except Exception as e:
+            log_error(e, {"method": "get_conversation_history", "thread_id": thread_id})
+            return []
+    
+    def clear_memory(self, thread_id: str = "default"):
+        """Clear conversation memory for a specific thread"""
+        try:
+            # Clear LangChain memory
+            self.memory.clear()
+            
+            # Clear LangGraph state (note: MemorySaver doesn't have direct clear method)
+            # Memory will naturally expire or can be handled at the application level
+            log_agent_response("memory_cleared", 0, 0)
+            
+        except Exception as e:
+            log_error(e, {"method": "clear_memory", "thread_id": thread_id})

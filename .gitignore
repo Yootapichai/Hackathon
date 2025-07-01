@@ -178,3 +178,4 @@ pyrightconfig.json
 
 CLAUDE.md
 instruction.md
+conversations.db*

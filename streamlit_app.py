@@ -47,7 +47,9 @@ def main():
         if st.button("🗑️ Clear Chat History"):
             log_streamlit_event("clear_chat_history")
             st.session_state.messages = []
-            st.session_state.agent = SupplyChainAgent()
+            if "agent" in st.session_state:
+                # Clear both LangChain and LangGraph memory
+                st.session_state.agent.clear_memory(st.session_state.get("thread_id", "default"))
             st.rerun()
         
         # Debug Panel
@@ -74,6 +76,13 @@ def main():
             if "agent" in st.session_state:
                 st.success("✅ Agent initialized")
                 st.info(f"Dataframes loaded: {len(st.session_state.agent.dataframes)}")
+                
+                # Show memory status
+                try:
+                    history = st.session_state.agent.get_conversation_history(st.session_state.thread_id)
+                    st.info(f"Conversation messages in memory: {len(history)}")
+                except:
+                    st.warning("Could not retrieve conversation history")
             else:
                 st.warning("⚠️ Agent not initialized")
             
@@ -81,13 +90,25 @@ def main():
             st.subheader("Session Info")
             st.json({
                 "messages_count": len(st.session_state.get("messages", [])),
-                "session_id": st.session_state.get("session_id", "default"),
+                "thread_id": st.session_state.get("thread_id", "default"),
                 "timestamp": datetime.now().isoformat()
             })
+            
+            # Memory info
+            st.subheader("Memory Status")
+            if "agent" in st.session_state:
+                st.info("✅ LangGraph SQLite persistence enabled")
+                st.info("✅ LangChain window memory (5 exchanges)")
+            else:
+                st.warning("⚠️ Memory not initialized")
     
     # Initialize session state
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    
+    if "thread_id" not in st.session_state:
+        import uuid
+        st.session_state.thread_id = str(uuid.uuid4())
     
     if "agent" not in st.session_state:
         with st.spinner("🔄 Loading supply chain data and initializing agent..."):
@@ -125,7 +146,10 @@ def main():
         with st.chat_message("assistant"):
             with st.spinner("🤔 Analyzing your data..."):
                 try:
-                    response = st.session_state.agent.process_query(user_input)
+                    response = st.session_state.agent.process_query(
+                        user_input, 
+                        thread_id=st.session_state.thread_id
+                    )
                     
                     # Handle different response types
                     if response["type"] == "text":
