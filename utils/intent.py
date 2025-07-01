@@ -1,12 +1,9 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 
-from langchain_core.messages import SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from operator import itemgetter
 from dataframe import transactions_master_df, inventory_master_df, storage_cost_df, transfer_cost_df
 from langchain_core.runnables import RunnableLambda
 
