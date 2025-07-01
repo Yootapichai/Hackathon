@@ -115,12 +115,12 @@ def main():
             st.session_state.agent = SupplyChainAgent()
     
     # Display chat messages
-    for message in st.session_state.messages:
+    for idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             if message["type"] == "text":
                 st.markdown(message["content"])
             elif message["type"] == "plotly":
-                st.plotly_chart(message["content"], use_container_width=True)
+                st.plotly_chart(message["content"], use_container_width=True, key=f"plotly_{idx}_{id(message)}")
             elif message["type"] == "dataframe":
                 st.dataframe(message["content"], use_container_width=True)
     
@@ -163,7 +163,7 @@ def main():
                     
                     elif response["type"] == "text_with_chart":
                         st.markdown(response["text"])
-                        st.plotly_chart(response["chart"], use_container_width=True)
+                        st.plotly_chart(response["chart"], use_container_width=True, key=f"chart_{st.session_state.thread_id}_{len(st.session_state.messages)}")
                         st.session_state.messages.extend([
                             {"role": "assistant", "type": "text", "content": response["text"]},
                             {"role": "assistant", "type": "plotly", "content": response["chart"]}
