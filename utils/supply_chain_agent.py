@@ -299,19 +299,19 @@ Your answer must end with smile emoji
     def _create_time_series_chart(self, query: str) -> Dict[str, Any]:
         """Create time-series visualizations"""
         try:
-            # SQL query for monthly transaction trends (uppercase quoted columns)
+            # SQL query for monthly transaction trends (lowercase columns)
             sql_query = """
             WITH combined_transactions AS (
                 SELECT 
-                    "INBOUND_DATE" as transaction_date,
+                    inbound_date as transaction_date,
                     'INBOUND' as transaction_type,
-                    "NET_QUANTITY_MT" as net_quantity_mt
+                    net_quantity_mt as net_quantity_mt
                 FROM inbound
                 UNION ALL
                 SELECT 
-                    "OUTBOUND_DATE" as transaction_date,
+                    outbound_date as transaction_date,
                     'OUTBOUND' as transaction_type,
-                    "NET_QUANTITY_MT" as net_quantity_mt
+                    net_quantity_mt as net_quantity_mt
                 FROM outbound
             ),
             monthly_data AS (
@@ -356,17 +356,17 @@ Your answer must end with smile emoji
         """Create ranking/top N visualizations"""
         try:
             if 'material' in query.lower():
-                # Top materials by volume (uppercase quoted columns)
+                # Top materials by volume (lowercase columns)
                 sql_query = """
                 WITH combined_transactions AS (
                     SELECT 
-                        "MATERIAL_NAME" as material_name, 
-                        "NET_QUANTITY_MT" as net_quantity_mt 
+                        material_name, 
+                        net_quantity_mt 
                     FROM inbound
                     UNION ALL
                     SELECT 
-                        "MATERIAL_NAME" as material_name, 
-                        "NET_QUANTITY_MT" as net_quantity_mt 
+                        material_name, 
+                        net_quantity_mt 
                     FROM outbound
                 ),
                 material_totals AS (
@@ -394,17 +394,17 @@ Your answer must end with smile emoji
                 )
                 
             elif 'plant' in query.lower():
-                # Top plants by volume (uppercase quoted columns)
+                # Top plants by volume (lowercase columns)
                 sql_query = """
                 WITH combined_transactions AS (
                     SELECT 
-                        "PLANT_NAME" as plant_name, 
-                        "NET_QUANTITY_MT" as net_quantity_mt 
+                        plant_name, 
+                        net_quantity_mt 
                     FROM inbound
                     UNION ALL
                     SELECT 
-                        "PLANT_NAME" as plant_name, 
-                        "NET_QUANTITY_MT" as net_quantity_mt 
+                        plant_name, 
+                        net_quantity_mt 
                     FROM outbound
                 ),
                 plant_totals AS (
@@ -431,17 +431,17 @@ Your answer must end with smile emoji
                 )
                 
             else:
-                # Default: top materials (uppercase quoted columns)
+                # Default: top materials (lowercase columns)
                 sql_query = """
                 WITH combined_transactions AS (
                     SELECT 
-                        "MATERIAL_NAME" as material_name, 
-                        "NET_QUANTITY_MT" as net_quantity_mt 
+                        material_name, 
+                        net_quantity_mt 
                     FROM inbound
                     UNION ALL
                     SELECT 
-                        "MATERIAL_NAME" as material_name, 
-                        "NET_QUANTITY_MT" as net_quantity_mt 
+                        material_name, 
+                        net_quantity_mt 
                     FROM outbound
                 ),
                 material_totals AS (
@@ -473,14 +473,14 @@ Your answer must end with smile emoji
     def _create_inventory_chart(self, query: str) -> Dict[str, Any]:
         """Create inventory-related visualizations"""
         try:
-            # SQL query for inventory levels by plant (cast text to numeric)
+            # SQL query for inventory levels by plant (lowercase columns)
             sql_query = """
             SELECT 
-                "PLANT_NAME" as plant_name,
-                SUM("UNRESRICTED_STOCK") as total_inventory
+                plant_name,
+                SUM(unrestricted_stock) as total_inventory
             FROM inventory
-            WHERE "UNRESRICTED_STOCK" > 0
-            GROUP BY "PLANT_NAME"
+            WHERE unrestricted_stock > 0
+            GROUP BY plant_name
             ORDER BY total_inventory DESC;
             """
             
@@ -505,13 +505,13 @@ Your answer must end with smile emoji
         """Create cost-related visualizations"""
         try:
             if 'storage' in query.lower():
-                # Storage costs by plant (uppercase quoted columns)
+                # Storage costs by plant (lowercase columns)
                 sql_query = """
                 SELECT 
-                    "ENTITY_NAME" as plant_name,
-                    "COST_AMOUNT" as storage_cost
+                    entity_name as plant_name,
+                    cost_amount as storage_cost
                 FROM operation_costs
-                WHERE "COST_TYPE" = 'Inventory Storage per MT per day'
+                WHERE cost_type = 'Inventory Storage per MT per day'
                 ORDER BY storage_cost DESC;
                 """
                 
@@ -529,13 +529,13 @@ Your answer must end with smile emoji
                 )
                 
             elif 'transfer' in query.lower():
-                # Transfer costs by transport mode (uppercase quoted columns)
+                # Transfer costs by transport mode (lowercase columns)
                 sql_query = """
                 SELECT 
-                    "ENTITY_NAME" as transport_mode,
-                    "COST_AMOUNT" as transfer_cost
+                    entity_name as transport_mode,
+                    cost_amount as transfer_cost
                 FROM operation_costs
-                WHERE "COST_TYPE" = 'Transfer cost per container (24.75MT)'
+                WHERE cost_type = 'Transfer cost per container (24.75MT)'
                 ORDER BY transfer_cost DESC;
                 """
                 
@@ -553,13 +553,13 @@ Your answer must end with smile emoji
                 )
                 
             else:
-                # Default storage costs (uppercase quoted columns)
+                # Default storage costs (lowercase columns)
                 sql_query = """
                 SELECT 
-                    "ENTITY_NAME" as plant_name,
-                    "COST_AMOUNT" as storage_cost
+                    entity_name as plant_name,
+                    cost_amount as storage_cost
                 FROM operation_costs
-                WHERE "COST_TYPE" = 'Inventory Storage per MT per day'
+                WHERE cost_type = 'Inventory Storage per MT per day'
                 ORDER BY storage_cost DESC;
                 """
                 
