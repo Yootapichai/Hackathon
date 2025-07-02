@@ -170,16 +170,11 @@ class SupplyChainAgent:
 You are an expert supply chain data analyst with access to a PostgreSQL database containing:
 
 Tables:
-- material_master: Material information ("MATERIAL_NAME", "POLYMER_TYPE", "SHELF_LIFE_IN_MONTH", "DOWNGRADE_VALUE_LOST_PERCENT")
-- inventory: Current stock levels ("BALANCE_AS_OF_DATE", "PLANT_NAME", "MATERIAL_NAME", "BATCH_NUMBER", "UNRESTRICTED_STOCK", "STOCK_UNIT", "STOCK_SELL_VALUE", "CURRENCY")
-- inbound: Incoming shipments ("INBOUND_DATE", "PLANT_NAME", "MATERIAL_NAME", "NET_QUANTITY_MT")
-- outbound: Outgoing shipments ("OUTBOUND_DATE", "PLANT_NAME", "MATERIAL_NAME", "CUSTOMER_NUMBER", "MODE_OF_TRANSPORT", "NET_QUANTITY_MT")
-- operation_costs: Storage and transfer costs ("OPERATION_CATEGORY", "COST_TYPE", "ENTITY_NAME", "ENTITY_TYPE", "COST_AMOUNT", "COST_UNIT", "CONTAINER_CAPACITY_MT", "CURRENCY")
-
-CRITICAL SQL Rules:
-- ALWAYS use double quotes around ALL column names exactly as shown above
-- Column names are case-sensitive - use the exact format listed
-- Example: SELECT "MATERIAL_NAME", SUM("NET_QUANTITY_MT") FROM outbound
+- material_master: Material information (material_name, polymer_type, shelf_life_in_month, downgrade_value_lost_percent)
+- inventory: Current stock levels (balance_as_of_date, plant_name, material_name, batch_number, unrestricted_stock, stock_unit, stock_sell_value, currency)
+- inbound: Incoming shipments (inbound_date, plant_name, material_name, net_quantity_mt)
+- outbound: Outgoing shipments (outbound_date, plant_name, material_name, customer_number, mode_of_transport, net_quantity_mt)
+- operation_costs: Storage and transfer costs (operation_category, cost_type, entity_name, entity_type, cost_amount, cost_unit, container_capacity_mt, currency)
 
 Key Business Rules:
 - Stock quantities are in KG for inventory, MT for inbound/outbound
@@ -188,6 +183,7 @@ Key Business Rules:
 - Materials have shelf life and degradation rates
 
 Always provide actionable insights and consider business context in your analysis.
+Your answer must end with smile emoji
 """
                 
                 # Create SQL toolkit
@@ -199,8 +195,8 @@ Always provide actionable insights and consider business context in your analysi
                         llm=self.llm,
                         toolkit=toolkit,
                         verbose=True,
-                        agent_type="zero-shot-react-description",
-                        system_prefix=system_prefix,
+                        agent_type="openai-tools",  # Changed from zero-shot-react-description
+                        prefix=system_prefix,  # Use prefix parameter for openai-tools agent
                         handle_parsing_errors=True,
                         memory=self.memory  # Use proper LangChain memory
                     )
@@ -211,8 +207,8 @@ Always provide actionable insights and consider business context in your analysi
                         llm=self.llm,
                         toolkit=toolkit,
                         verbose=True,
-                        agent_type="zero-shot-react-description",
-                        system_prefix=system_prefix,
+                        agent_type="openai-tools",  # Changed from zero-shot-react-description
+                        prefix=system_prefix,  # Use prefix parameter for openai-tools agent
                         handle_parsing_errors=True
                     )
                 
