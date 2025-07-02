@@ -184,8 +184,7 @@ def intent_router(question: str, chat_history: list = None):
 if __name__ == "__main__":
     print("Testing intent router...")
     test_result = intent_router(
-        question="What date is the last OUTBOUND sale on material MAT-0354?",
+        question="What is main reason to build warehouses?",
         chat_history=[]
     )
-    print(f"Intent classification result: {test_result}")
     
