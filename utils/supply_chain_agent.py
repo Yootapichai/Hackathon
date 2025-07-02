@@ -6,7 +6,9 @@ import time
 import traceback
 from typing import Dict, Any, List
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
+from langchain_community.agent_toolkits.sql.base import create_sql_agent
+from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
+from langchain_community.utilities import SQLDatabase
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
@@ -21,7 +23,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from typing import TypedDict, Annotated
 from dotenv import load_dotenv
 
-from .dataframe import transactions_master_df, inventory_master_df, storage_cost_df, transfer_cost_df
+# SQL database connection replaces dataframe imports
 from .logger import (
     log_query, log_tool_call, log_tool_result, log_agent_response, 
     log_error, log_dataframe_operation, log_visualization
@@ -50,12 +52,17 @@ class SupplyChainAgent:
                 verbose=True
             )
             
-            self.dataframes = {
-                'transactions': transactions_master_df,
-                'inventory': inventory_master_df, 
-                'storage_costs': storage_cost_df,
-                'transfer_costs': transfer_cost_df
-            }
+            # Initialize SQL database connection
+            self.db = self._create_database_connection()
+            
+            # Log database connection info
+            try:
+                table_names = self.db.get_usable_table_names()
+                log_agent_response("sql_connection_initialized", len(table_names), 0)
+                for table in table_names:
+                    log_dataframe_operation("sql_table_available", table, (0, 0))
+            except Exception as e:
+                log_error(e, {"component": "database_logging"})
             
             # Initialize LangChain memory for pandas agent
             self.memory = ConversationBufferWindowMemory(
@@ -76,9 +83,7 @@ class SupplyChainAgent:
                 log_error(e, {"fallback": "using in-memory storage"})
                 self.langgraph_memory = MemorySaver()
             
-            # Log dataframe info
-            for name, df in self.dataframes.items():
-                log_dataframe_operation("load", name, df.shape)
+            # Database connection successful
             
             self._setup_tools()
             self._setup_agent()
@@ -89,75 +94,78 @@ class SupplyChainAgent:
             log_error(e, {"component": "agent_init"})
             raise
     
+    def _create_database_connection(self):
+        """Create connection to Supabase PostgreSQL database"""
+        try:
+            supabase_url = os.environ.get("SUPABASE_URL")
+            supabase_password = os.environ.get("SUPABASE_DB_PASSWORD")
+            
+            if not supabase_url or not supabase_password:
+                raise ValueError("SUPABASE_URL and SUPABASE_DB_PASSWORD environment variables are required")
+            
+            # Extract project ID from Supabase URL
+            project_id = supabase_url.split("//")[1].split(".")[0]
+            
+            # PostgreSQL connection string for Supabase
+            db_uri = f"postgresql://postgres:{supabase_password}@db.{project_id}.supabase.co:5432/postgres"
+            
+            return SQLDatabase.from_uri(db_uri)
+        except Exception as e:
+            log_error(e, {"component": "database_connection"})
+            raise
+    
     def _setup_tools(self):
         @tool
-        def analyze_dataframe(query: str) -> str:
-            """Analyze supply chain data using pandas operations. Use this for data analysis questions."""
+        def analyze_supply_chain_data(query: str) -> str:
+            """Analyze supply chain data using SQL queries. Use this for data analysis questions."""
             
             start_time = time.time()
-            log_tool_call("analyze_dataframe", query)
+            log_tool_call("analyze_supply_chain_data", query)
             
             try:
-                data_dictionary_prefix = """
-You are a supply chain data analyst expert.
-You have access to pandas dataframes with supply chain data.
-The dataframes are available as df1, df2, df3, and df4.
+                # Enhanced system prompt for SQL agent with business context
+                system_prefix = """
+You are an expert supply chain data analyst with access to a PostgreSQL database containing:
 
-Dataframe mapping:
-- df1: transactions_master_df - Transaction log (inbound/outbound) with material details
-- df2: inventory_master_df - Monthly inventory snapshots with material details  
-- df3: storage_cost_df - Storage costs per MT per day by plant
-- df4: transfer_cost_df - Transfer costs per container by transport mode
+Tables:
+- material_master: Material information (material_name, polymer_type, shelf_life_in_month, downgrade_value_lost_percent)
+- inventory: Current stock levels (balance_as_of_date, plant_name, material_name, batch_number, unrestricted_stock, stock_unit, stock_sell_value, currency)
+- inbound: Incoming shipments (inbound_date, plant_name, material_name, net_quantity_mt)
+- outbound: Outgoing shipments (outbound_date, plant_name, material_name, customer_number, mode_of_transport, net_quantity_mt)
+- operation_costs: Storage and transfer costs (operation_category, cost_type, entity_name, entity_type, cost_amount, cost_unit, container_capacity_mt, currency)
 
-Important columns:
-- TRANSACTION_DATE: Transaction date
-- PLANT_NAME: Plant/warehouse name
-- MATERIAL_NAME: Specific product name
-- NET_QUANTITY_MT: Quantity in Metric Tons
-- TRANSACTION_TYPE: 'INBOUND' or 'OUTBOUND'
-- POLYMER_TYPE: Material category
-- BALANCE_AS_OF_DATE: Inventory snapshot date
-- UNRESTRICTED_STOCK: Available quantity
-- STOCK_SELL_VALUE: Inventory value
-- STORAGE_COST_PER_MT_DAY: Storage cost per MT per day
-- MODE_OF_TRANSPORT: Transportation method
-- TRANSFER_COST_PER_CONTAINER: Cost per container transfer
+Key Business Rules:
+- Stock quantities are in KG for inventory, MT for inbound/outbound
+- Different plants use different currencies (CNY for China, SGD for Singapore)
+- Batch numbers track specific material lots
+- Materials have shelf life and degradation rates
 
-IMPORTANT: Always use df1, df2, df3, df4 in your Python code. Do not redefine these variables.
-
-When you need to execute Python code, use the python_repl_ast tool.
-Format your response as:
-
-Thought: I need to analyze the data to answer this question.
-Action: python_repl_ast
-Action Input: <your_python_code_here>
-Observation: <result_will_appear_here>
-... (repeat until you have the final answer)
-Final Answer: <your_final_answer>
-                """
+Always provide actionable insights and consider business context in your analysis.
+"""
                 
-                # Create pandas agent with proper memory integration
+                # Create SQL toolkit
+                toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
+                
+                # Create SQL agent with proper memory integration
                 try:
-                    agent = create_pandas_dataframe_agent(
-                        self.llm,
-                        [transactions_master_df, inventory_master_df, storage_cost_df, transfer_cost_df],
-                        prefix=data_dictionary_prefix,
-                        allow_dangerous_code=True,
+                    agent = create_sql_agent(
+                        llm=self.llm,
+                        toolkit=toolkit,
                         verbose=True,
                         agent_type="zero-shot-react-description",
+                        system_prefix=system_prefix,
                         handle_parsing_errors=True,
                         memory=self.memory  # Use proper LangChain memory
                     )
                 except Exception as e:
                     log_error(e, {"fallback": "trying without memory"})
                     # Fallback without memory if it causes issues
-                    agent = create_pandas_dataframe_agent(
-                        self.llm,
-                        [transactions_master_df, inventory_master_df, storage_cost_df, transfer_cost_df],
-                        prefix=data_dictionary_prefix,
-                        allow_dangerous_code=True,
+                    agent = create_sql_agent(
+                        llm=self.llm,
+                        toolkit=toolkit,
                         verbose=True,
                         agent_type="zero-shot-react-description",
+                        system_prefix=system_prefix,
                         handle_parsing_errors=True
                     )
                 
@@ -165,15 +173,15 @@ Final Answer: <your_final_answer>
                 result = agent.invoke({"input": query})["output"]
                 
                 execution_time = time.time() - start_time
-                log_tool_result("analyze_dataframe", "text", True)
-                log_tool_call("analyze_dataframe", query, execution_time)
+                log_tool_result("analyze_supply_chain_data", "text", True)
+                log_tool_call("analyze_supply_chain_data", query, execution_time)
                 
                 return result
                 
             except Exception as e:
                 execution_time = time.time() - start_time
-                log_tool_result("analyze_dataframe", "error", False, str(e))
-                log_error(e, {"tool": "analyze_dataframe", "query": query})
+                log_tool_result("analyze_supply_chain_data", "error", False, str(e))
+                log_error(e, {"tool": "analyze_supply_chain_data", "query": query})
                 return f"Error analyzing data: {str(e)}"
         
         @tool 
@@ -215,29 +223,60 @@ Final Answer: <your_final_answer>
                 log_error(e, {"tool": "create_visualization", "query": query})
                 return {"type": "error", "message": f"Error creating visualization: {str(e)}"}
         
-        self.analyze_tool = analyze_dataframe
+        self.analyze_tool = analyze_supply_chain_data
         self.visualize_tool = create_visualization
     
     def _create_time_series_chart(self, query: str) -> Dict[str, Any]:
         """Create time-series visualizations"""
         try:
-            # Monthly transaction trends
-            df = transactions_master_df.copy()
-            df['TRANSACTION_DATE'] = pd.to_datetime(df['TRANSACTION_DATE'])
-            df['MONTH'] = df['TRANSACTION_DATE'].dt.to_period('M')
+            # SQL query for monthly transaction trends (uppercase quoted columns)
+            sql_query = """
+            WITH combined_transactions AS (
+                SELECT 
+                    "INBOUND_DATE" as transaction_date,
+                    'INBOUND' as transaction_type,
+                    "NET_QUANTITY_MT" as net_quantity_mt
+                FROM inbound
+                UNION ALL
+                SELECT 
+                    "OUTBOUND_DATE" as transaction_date,
+                    'OUTBOUND' as transaction_type,
+                    "NET_QUANTITY_MT" as net_quantity_mt
+                FROM outbound
+            ),
+            monthly_data AS (
+                SELECT 
+                    DATE_TRUNC('month', transaction_date::DATE) as month,
+                    transaction_type,
+                    SUM(net_quantity_mt) as total_quantity
+                FROM combined_transactions
+                WHERE transaction_date IS NOT NULL
+                GROUP BY DATE_TRUNC('month', transaction_date::DATE), transaction_type
+                ORDER BY month, transaction_type
+            )
+            SELECT 
+                TO_CHAR(month, 'YYYY-MM') as month_str,
+                transaction_type,
+                total_quantity
+            FROM monthly_data;
+            """
             
-            monthly_data = df.groupby(['MONTH', 'TRANSACTION_TYPE'])['NET_QUANTITY_MT'].sum().reset_index()
-            monthly_data['MONTH'] = monthly_data['MONTH'].astype(str)
+            # Execute query and get results
+            df = pd.read_sql_query(sql_query, self.db._engine)
+            
+            if df.empty:
+                return {"type": "error", "message": "No transaction data found for time series"}
             
             fig = px.line(
-                monthly_data, 
-                x='MONTH', 
-                y='NET_QUANTITY_MT', 
-                color='TRANSACTION_TYPE',
+                df, 
+                x='month_str', 
+                y='total_quantity', 
+                color='transaction_type',
                 title='Monthly Transaction Trends',
-                labels={'NET_QUANTITY_MT': 'Quantity (MT)', 'MONTH': 'Month'}
+                labels={'total_quantity': 'Quantity (MT)', 'month_str': 'Month', 'transaction_type': 'Transaction Type'}
             )
             
+            fig.update_layout(xaxis_tickangle=-45)
             return {"type": "plotly", "chart": fig, "description": "Monthly transaction trends showing inbound vs outbound volumes"}
             
         except Exception as e:
@@ -247,38 +286,113 @@ Final Answer: <your_final_answer>
         """Create ranking/top N visualizations"""
         try:
             if 'material' in query.lower():
-                # Top materials by volume
-                df = transactions_master_df.groupby('MATERIAL_NAME')['NET_QUANTITY_MT'].sum().reset_index()
-                df = df.nlargest(10, 'NET_QUANTITY_MT')
+                # Top materials by volume (uppercase quoted columns)
+                sql_query = """
+                WITH combined_transactions AS (
+                    SELECT 
+                        "MATERIAL_NAME" as material_name, 
+                        "NET_QUANTITY_MT" as net_quantity_mt 
+                    FROM inbound
+                    UNION ALL
+                    SELECT 
+                        "MATERIAL_NAME" as material_name, 
+                        "NET_QUANTITY_MT" as net_quantity_mt 
+                    FROM outbound
+                ),
+                material_totals AS (
+                    SELECT 
+                        material_name,
+                        SUM(net_quantity_mt) as total_volume
+                    FROM combined_transactions
+                    WHERE material_name IS NOT NULL AND net_quantity_mt IS NOT NULL
+                    GROUP BY material_name
+                    ORDER BY total_volume DESC
+                    LIMIT 10
+                )
+                SELECT material_name, total_volume FROM material_totals;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
                 
                 fig = px.bar(
                     df, 
-                    x='NET_QUANTITY_MT', 
-                    y='MATERIAL_NAME',
+                    x='total_volume', 
+                    y='material_name',
                     orientation='h',
                     title='Top 10 Materials by Total Volume',
-                    labels={'NET_QUANTITY_MT': 'Total Volume (MT)', 'MATERIAL_NAME': 'Material'}
+                    labels={'total_volume': 'Total Volume (MT)', 'material_name': 'Material'}
                 )
                 
             elif 'plant' in query.lower():
-                # Top plants by volume
-                df = transactions_master_df.groupby('PLANT_NAME')['NET_QUANTITY_MT'].sum().reset_index()
-                df = df.nlargest(10, 'NET_QUANTITY_MT')
+                # Top plants by volume (uppercase quoted columns)
+                sql_query = """
+                WITH combined_transactions AS (
+                    SELECT 
+                        "PLANT_NAME" as plant_name, 
+                        "NET_QUANTITY_MT" as net_quantity_mt 
+                    FROM inbound
+                    UNION ALL
+                    SELECT 
+                        "PLANT_NAME" as plant_name, 
+                        "NET_QUANTITY_MT" as net_quantity_mt 
+                    FROM outbound
+                ),
+                plant_totals AS (
+                    SELECT 
+                        plant_name,
+                        SUM(net_quantity_mt) as total_volume
+                    FROM combined_transactions
+                    WHERE plant_name IS NOT NULL AND net_quantity_mt IS NOT NULL
+                    GROUP BY plant_name
+                    ORDER BY total_volume DESC
+                    LIMIT 10
+                )
+                SELECT plant_name, total_volume FROM plant_totals;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
                 
                 fig = px.bar(
                     df, 
-                    x='PLANT_NAME', 
-                    y='NET_QUANTITY_MT',
+                    x='plant_name', 
+                    y='total_volume',
                     title='Top 10 Plants by Total Volume',
-                    labels={'NET_QUANTITY_MT': 'Total Volume (MT)', 'PLANT_NAME': 'Plant'}
+                    labels={'total_volume': 'Total Volume (MT)', 'plant_name': 'Plant'}
                 )
                 
             else:
-                # Default: top materials
-                df = transactions_master_df.groupby('MATERIAL_NAME')['NET_QUANTITY_MT'].sum().reset_index()
-                df = df.nlargest(10, 'NET_QUANTITY_MT')
+                # Default: top materials (uppercase quoted columns)
+                sql_query = """
+                WITH combined_transactions AS (
+                    SELECT 
+                        "MATERIAL_NAME" as material_name, 
+                        "NET_QUANTITY_MT" as net_quantity_mt 
+                    FROM inbound
+                    UNION ALL
+                    SELECT 
+                        "MATERIAL_NAME" as material_name, 
+                        "NET_QUANTITY_MT" as net_quantity_mt 
+                    FROM outbound
+                ),
+                material_totals AS (
+                    SELECT 
+                        material_name,
+                        SUM(net_quantity_mt) as total_volume
+                    FROM combined_transactions
+                    WHERE material_name IS NOT NULL AND net_quantity_mt IS NOT NULL
+                    GROUP BY material_name
+                    ORDER BY total_volume DESC
+                    LIMIT 10
+                )
+                SELECT material_name, total_volume FROM material_totals;
+                """
                 
-                fig = px.bar(df, x='MATERIAL_NAME', y='NET_QUANTITY_MT', title='Top 10 Materials by Volume')
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                fig = px.bar(df, x='material_name', y='total_volume', title='Top 10 Materials by Volume')
+            
+            if df.empty:
+                return {"type": "error", "message": "No data found for ranking chart"}
             
             fig.update_layout(xaxis_tickangle=-45)
             return {"type": "plotly", "chart": fig, "description": "Ranking chart based on your query"}
@@ -289,15 +403,26 @@ Final Answer: <your_final_answer>
     def _create_inventory_chart(self, query: str) -> Dict[str, Any]:
         """Create inventory-related visualizations"""
         try:
-            df = inventory_master_df.copy()
+            # SQL query for inventory levels by plant (cast text to numeric)
+            sql_query = """
+            SELECT 
+                "PLANT_NAME" as plant_name,
+                SUM("UNRESRICTED_STOCK") as total_inventory
+            FROM inventory
+            WHERE "UNRESRICTED_STOCK" > 0
+            GROUP BY "PLANT_NAME"
+            ORDER BY total_inventory DESC;
+            """
             
-            # Inventory levels by plant
-            plant_inventory = df.groupby('PLANT_NAME')['UNRESTRICTED_STOCK'].sum().reset_index()
+            df = pd.read_sql_query(sql_query, self.db._engine)
+            
+            if df.empty:
+                return {"type": "error", "message": "No inventory data found"}
             
             fig = px.pie(
-                plant_inventory, 
-                values='UNRESTRICTED_STOCK', 
-                names='PLANT_NAME',
+                df, 
+                values='total_inventory', 
+                names='plant_name',
                 title='Inventory Distribution by Plant'
             )
             
@@ -310,31 +435,70 @@ Final Answer: <your_final_answer>
         """Create cost-related visualizations"""
         try:
             if 'storage' in query.lower():
-                df = storage_cost_df.copy()
+                # Storage costs by plant (uppercase quoted columns)
+                sql_query = """
+                SELECT 
+                    "ENTITY_NAME" as plant_name,
+                    "COST_AMOUNT" as storage_cost
+                FROM operation_costs
+                WHERE "COST_TYPE" = 'Inventory Storage per MT per day'
+                ORDER BY storage_cost DESC;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                if df.empty:
+                    return {"type": "error", "message": "No storage cost data found"}
                 
                 fig = px.bar(
                     df, 
-                    x='PLANT_NAME', 
-                    y='STORAGE_COST_PER_MT_DAY',
+                    x='plant_name', 
+                    y='storage_cost',
                     title='Storage Costs by Plant',
-                    labels={'STORAGE_COST_PER_MT_DAY': 'Cost per MT per Day', 'PLANT_NAME': 'Plant'}
+                    labels={'storage_cost': 'Cost per MT per Day', 'plant_name': 'Plant'}
                 )
                 
             elif 'transfer' in query.lower():
-                df = transfer_cost_df.copy()
+                # Transfer costs by transport mode (uppercase quoted columns)
+                sql_query = """
+                SELECT 
+                    "ENTITY_NAME" as transport_mode,
+                    "COST_AMOUNT" as transfer_cost
+                FROM operation_costs
+                WHERE "COST_TYPE" = 'Transfer cost per container (24.75MT)'
+                ORDER BY transfer_cost DESC;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                if df.empty:
+                    return {"type": "error", "message": "No transfer cost data found"}
                 
                 fig = px.bar(
                     df, 
-                    x='MODE_OF_TRANSPORT', 
-                    y='TRANSFER_COST_PER_CONTAINER',
+                    x='transport_mode', 
+                    y='transfer_cost',
                     title='Transfer Costs by Transport Mode',
-                    labels={'TRANSFER_COST_PER_CONTAINER': 'Cost per Container', 'MODE_OF_TRANSPORT': 'Transport Mode'}
+                    labels={'transfer_cost': 'Cost per Container', 'transport_mode': 'Transport Mode'}
                 )
                 
             else:
-                # Default storage costs
-                df = storage_cost_df.copy()
-                fig = px.bar(df, x='PLANT_NAME', y='STORAGE_COST_PER_MT_DAY', title='Storage Costs by Plant')
+                # Default storage costs (uppercase quoted columns)
+                sql_query = """
+                SELECT 
+                    "ENTITY_NAME" as plant_name,
+                    "COST_AMOUNT" as storage_cost
+                FROM operation_costs
+                WHERE "COST_TYPE" = 'Inventory Storage per MT per day'
+                ORDER BY storage_cost DESC;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                if df.empty:
+                    return {"type": "error", "message": "No cost data found"}
+                
+                fig = px.bar(df, x='plant_name', y='storage_cost', title='Storage Costs by Plant')
             
             fig.update_layout(xaxis_tickangle=-45)
             return {"type": "plotly", "chart": fig, "description": "Cost analysis visualization"}
@@ -346,13 +510,24 @@ Final Answer: <your_final_answer>
         """Create general visualizations"""
         try:
             # Default: transaction type distribution
-            df = transactions_master_df['TRANSACTION_TYPE'].value_counts().reset_index()
-            df.columns = ['TRANSACTION_TYPE', 'COUNT']
+            sql_query = """
+            WITH transaction_counts AS (
+                SELECT 'INBOUND' as transaction_type, COUNT(*) as count FROM inbound
+                UNION ALL
+                SELECT 'OUTBOUND' as transaction_type, COUNT(*) as count FROM outbound
+            )
+            SELECT transaction_type, count FROM transaction_counts;
+            """
+            
+            df = pd.read_sql_query(sql_query, self.db._engine)
+            
+            if df.empty:
+                return {"type": "error", "message": "No transaction data found"}
             
             fig = px.pie(
                 df, 
-                values='COUNT', 
-                names='TRANSACTION_TYPE',
+                values='count', 
+                names='transaction_type',
                 title='Transaction Type Distribution'
             )
             

@@ -75,7 +75,12 @@ def main():
             st.subheader("Agent Status")
             if "agent" in st.session_state:
                 st.success("✅ Agent initialized")
-                st.info(f"Dataframes loaded: {len(st.session_state.agent.dataframes)}")
+                try:
+                    table_names = st.session_state.agent.db.get_usable_table_names()
+                    st.info(f"Database tables available: {len(table_names)}")
+                    st.text(f"Tables: {', '.join(table_names)}")
+                except:
+                    st.info("SQL database connected")
                 
                 # Show memory status
                 try:
