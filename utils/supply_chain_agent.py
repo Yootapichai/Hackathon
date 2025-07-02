@@ -23,11 +23,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from typing import TypedDict, Annotated
 from dotenv import load_dotenv
 
-# SQL database connection replaces dataframe imports
-from .logger import (
-    log_query, log_tool_call, log_tool_result, log_agent_response, 
-    log_error, log_dataframe_operation, log_visualization
-)
+from loguru import logger
 
 load_dotenv()
 
@@ -76,12 +72,12 @@ class AgentState(TypedDict):
 class SupplyChainAgent:
     def __init__(self):
         try:
-            log_agent_response("agent_init", 0, 0)
+            logger.info("Agent initialization started")
             
             self.google_api_key = os.environ.get('GOOGLE_API_KEY')
             if not self.google_api_key:
                 error_msg = "GOOGLE_API_KEY environment variable is required"
-                log_error(ValueError(error_msg), {"component": "agent_init"})
+                logger.error(f"Agent initialization failed: {error_msg}")
                 raise ValueError(error_msg)
             
             self.llm = ChatGoogleGenerativeAI(
@@ -97,11 +93,11 @@ class SupplyChainAgent:
             # Log database connection info
             try:
                 table_names = self.db.get_usable_table_names()
-                log_agent_response("sql_connection_initialized", len(table_names), 0)
+                logger.info(f"SQL connection initialized with {len(table_names)} tables")
                 for table in table_names:
-                    log_dataframe_operation("sql_table_available", table, (0, 0))
+                    logger.debug(f"SQL table available: {table}")
             except Exception as e:
-                log_error(e, {"component": "database_logging"})
+                logger.error(f"Database logging error: {e}")
             
             # Initialize LangChain memory for pandas agent
             self.memory = ConversationBufferWindowMemory(
@@ -116,10 +112,10 @@ class SupplyChainAgent:
                 import sqlite3
                 conn = sqlite3.connect("conversations.db", check_same_thread=False)
                 self.langgraph_memory = SqliteSaver(conn)
-                log_agent_response("sqlite_memory_initialized", 0, 0)
+                logger.info("SQLite memory initialized")
             except Exception as e:
                 # Fallback to in-memory storage
-                log_error(e, {"fallback": "using in-memory storage"})
+                logger.error(f"SQLite memory initialization failed, using in-memory storage: {e}")
                 self.langgraph_memory = MemorySaver()
             
             # Database connection successful
@@ -127,10 +123,10 @@ class SupplyChainAgent:
             self._setup_tools()
             self._setup_agent()
             
-            log_agent_response("agent_init_complete", 0, 0)
+            logger.info("Agent initialization complete")
             
         except Exception as e:
-            log_error(e, {"component": "agent_init"})
+            logger.error(f"Agent initialization failed: {e}")
             raise
     
     def _create_database_connection(self):
@@ -150,7 +146,7 @@ class SupplyChainAgent:
             
             return QueryCapturingSQLDatabase.from_uri(db_uri)
         except Exception as e:
-            log_error(e, {"component": "database_connection"})
+            logger.error(f"Database connection failed: {e}")
             raise
     
     def _setup_tools(self):
@@ -159,7 +155,7 @@ class SupplyChainAgent:
             """Analyze supply chain data using SQL queries. Returns SQL, DataFrame, and natural language answer."""
             
             start_time = time.time()
-            log_tool_call("analyze_supply_chain_data", query)
+            logger.info(f"Starting supply chain data analysis: {query[:100]}...")
             
             try:
                 # Clear previous query cache
@@ -201,7 +197,7 @@ Your answer must end with smile emoji
                         memory=self.memory  # Use proper LangChain memory
                     )
                 except Exception as e:
-                    log_error(e, {"fallback": "trying without memory"})
+                    logger.error(f"SQL agent creation with memory failed, trying without memory: {e}")
                     # Fallback without memory if it causes issues
                     agent = create_sql_agent(
                         llm=self.llm,
@@ -225,15 +221,14 @@ Your answer must end with smile emoji
                     try:
                         # Execute the same query to get DataFrame
                         dataframe = pd.read_sql_query(sql_query, self.db._engine)
-                        log_dataframe_operation("sql_query_result", "captured", dataframe.shape)
+                        logger.debug(f"SQL query result captured with shape: {dataframe.shape}")
                     except Exception as df_error:
-                        log_error(df_error, {"context": "dataframe_creation", "sql": sql_query})
+                        logger.error(f"DataFrame creation failed for SQL: {sql_query[:100]}... Error: {df_error}")
                         # If DataFrame creation fails, still return the text result
                         pass
                 
                 execution_time = time.time() - start_time
-                log_tool_result("analyze_supply_chain_data", "enhanced_sql_response", True)
-                log_tool_call("analyze_supply_chain_data", query, execution_time)
+                logger.info(f"Supply chain data analysis completed successfully in {execution_time:.2f}s")
                 
                 # Return structured response
                 return {
@@ -245,8 +240,7 @@ Your answer must end with smile emoji
                 
             except Exception as e:
                 execution_time = time.time() - start_time
-                log_tool_result("analyze_supply_chain_data", "error", False, str(e))
-                log_error(e, {"tool": "analyze_supply_chain_data", "query": query})
+                logger.error(f"Supply chain data analysis failed in {execution_time:.2f}s: {e}")
                 
                 # Return error as text-only response
                 return {
@@ -259,7 +253,7 @@ Your answer must end with smile emoji
             """Create Plotly visualizations for supply chain data. Use this when users ask for charts, plots, or visual analysis."""
             
             start_time = time.time()
-            log_tool_call("create_visualization", query)
+            logger.info(f"Starting visualization creation: {query[:100]}...")
             
             try:
                 # Determine what type of visualization is needed
@@ -279,18 +273,16 @@ Your answer must end with smile emoji
                 execution_time = time.time() - start_time
                 
                 if result["type"] == "plotly":
-                    log_visualization(result.get("description", "unknown"), 0, True)
-                    log_tool_result("create_visualization", "plotly", True)
+                    logger.info(f"Visualization created successfully: {result.get('description', 'unknown')}")
                 else:
-                    log_tool_result("create_visualization", "error", False, result.get("message"))
+                    logger.error(f"Visualization creation failed: {result.get('message')}")
                 
-                log_tool_call("create_visualization", query, execution_time)
+                logger.info(f"Visualization creation completed in {execution_time:.2f}s")
                 return result
                 
             except Exception as e:
                 execution_time = time.time() - start_time
-                log_tool_result("create_visualization", "error", False, str(e))
-                log_error(e, {"tool": "create_visualization", "query": query})
+                logger.error(f"Visualization creation failed in {execution_time:.2f}s: {e}")
                 return {"type": "error", "message": f"Error creating visualization: {str(e)}"}
         
         self.analyze_tool = analyze_supply_chain_data
@@ -624,7 +616,7 @@ Your answer must end with smile emoji
     def process_query(self, query: str, thread_id: str = "default") -> Dict[str, Any]:
         """Process user query with proper memory management"""
         start_time = time.time()
-        log_query(query)
+        logger.info(f"Processing query: {query[:100]}...")
         
         try:
             # Create thread configuration for session persistence
@@ -644,7 +636,7 @@ Your answer must end with smile emoji
                         "chart": viz_result["chart"]
                     }
                     processing_time = time.time() - start_time
-                    log_agent_response("text_with_chart", len(response["text"]), processing_time)
+                    logger.info(f"Chart response generated in {processing_time:.2f}s - text length: {len(response['text'])}")
                     
                     # Store in LangChain memory for pandas agent context
                     self.memory.save_context(
@@ -656,7 +648,7 @@ Your answer must end with smile emoji
                 else:
                     error_msg = viz_result.get("message", "Error creating visualization")
                     processing_time = time.time() - start_time
-                    log_agent_response("error", len(error_msg), processing_time)
+                    logger.error(f"Visualization error in {processing_time:.2f}s: {error_msg}")
                     return {"type": "error", "content": error_msg}
             
             # For data analysis questions and conversation memory
@@ -668,7 +660,7 @@ Your answer must end with smile emoji
                 
                 # Handle the enhanced response with SQL and DataFrame
                 if isinstance(analysis_result, dict) and analysis_result.get("type") == "text_with_sql_and_dataframe":
-                    log_agent_response("text_with_sql_and_dataframe", len(analysis_result["text"]), processing_time)
+                    logger.info(f"SQL analysis response generated in {processing_time:.2f}s - text length: {len(analysis_result['text'])}")
                     
                     # Store in LangChain memory for context
                     self.memory.save_context(
@@ -680,14 +672,14 @@ Your answer must end with smile emoji
                     
                 # Handle error responses
                 elif isinstance(analysis_result, dict) and analysis_result.get("type") == "text":
-                    log_agent_response("error", len(analysis_result["content"]), processing_time)
+                    logger.error(f"Analysis error in {processing_time:.2f}s - content length: {len(analysis_result['content'])}")
                     return {"type": "error", "content": analysis_result["content"]}
                     
                 # Fallback for unexpected response format
                 else:
                     # If tool returns just text (old format), wrap it
                     response_text = str(analysis_result)
-                    log_agent_response("text", len(response_text), processing_time)
+                    logger.info(f"Text response generated in {processing_time:.2f}s - length: {len(response_text)}")
                     
                     self.memory.save_context(
                         {"input": query},
@@ -699,8 +691,7 @@ Your answer must end with smile emoji
         except Exception as e:
             processing_time = time.time() - start_time
             error_msg = f"Error processing query: {str(e)}"
-            log_error(e, {"query": query, "processing_time": processing_time})
-            log_agent_response("error", len(error_msg), processing_time)
+            logger.error(f"Query processing failed in {processing_time:.2f}s: {e}")
             return {"type": "error", "content": error_msg}
     
     def get_conversation_history(self, thread_id: str = "default") -> List[BaseMessage]:
@@ -710,7 +701,7 @@ Your answer must end with smile emoji
             state = self.app.get_state(config)
             return state.values.get("messages", [])
         except Exception as e:
-            log_error(e, {"method": "get_conversation_history", "thread_id": thread_id})
+            logger.error(f"Failed to get conversation history for thread {thread_id}: {e}")
             return []
     
     def clear_memory(self, thread_id: str = "default"):
@@ -721,7 +712,7 @@ Your answer must end with smile emoji
             
             # Clear LangGraph state (note: MemorySaver doesn't have direct clear method)
             # Memory will naturally expire or can be handled at the application level
-            log_agent_response("memory_cleared", 0, 0)
+            logger.info("Memory cleared successfully")
             
         except Exception as e:
-            log_error(e, {"method": "clear_memory", "thread_id": thread_id})
+            logger.error(f"Failed to clear memory for thread {thread_id}: {e}")
