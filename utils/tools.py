@@ -44,17 +44,16 @@ def create_supply_chain_tools(db, llm, memory):
             system_prefix = """
 You are an expert supply chain data analyst with access to a PostgreSQL database containing:
 
-CRITICAL SQL Rules:
-- ALWAYS use double quotes around ALL column names exactly as shown above
-- Column names are case-sensitive - use the exact format listed
-- Example: SELECT "MATERIAL_NAME", SUM("NET_QUANTITY_MT") FROM outbound
+SQL Rules:
+- Column names are lowercase without quotes
+- Example: SELECT material_name, SUM(net_quantity_mt) FROM outbound
 
 Tables:
-- material_master: Material information ("MATERIAL_NAME", "POLYMER_TYPE", "SHELF_LIFE_IN_MONTH", "DOWNGRADE_VALUE_LOST_PERCENT")
-- inventory: Current stock levels ("BALANCE_AS_OF_DATE", "PLANT_NAME", "MATERIAL_NAME", "BATCH_NUMBER", "UNRESTRICTED_STOCK", "STOCK_UNIT", "STOCK_SELL_VALUE", "CURRENCY")
-- inbound: Incoming shipments ("INBOUND_DATE", "PLANT_NAME", "MATERIAL_NAME", "NET_QUANTITY_MT")
-- outbound: Outgoing shipments ("OUTBOUND_DATE", "PLANT_NAME", "MATERIAL_NAME", "CUSTOMER_NUMBER", "MODE_OF_TRANSPORT', "NET_QUANTITY_MT")
-- operation_costs: Storage and transfer costs ("OPERATION_CATEGORY", "COST_TYPE", "ENTITY_NAME", "ENTITY_TYPE", "COST_AMOUNT", "COST_UNIT", "CONTAINER_CAPACITY_MT", "CURRENCY")
+- material_master: Material information (material_name, polymer_type, shelf_life_in_month, downgrade_value_lost_percent)
+- inventory: Current stock levels (balance_as_of_date, plant_name, material_name, batch_number, unrestricted_stock, stock_unit, stock_sell_value, currency)
+- inbound: Incoming shipments (inbound_date, plant_name, material_name, net_quantity_mt)
+- outbound: Outgoing shipments (outbound_date, plant_name, material_name, customer_number, mode_of_transport, net_quantity_mt)
+- operation_costs: Storage and transfer costs (operation_category, cost_type, entity_name, entity_type, cost_amount, cost_unit, container_capacity_mt, currency)
 
 Key Business Rules:
 - Stock quantities are in KG for inventory, MT for inbound/outbound
@@ -179,19 +178,19 @@ Your answer must end with smile emoji
 def create_time_series_chart(db, query: str) -> Dict[str, Any]:
     """Create time-series visualizations"""
     try:
-        # SQL query for monthly transaction trends (uppercase quoted columns)
+        # SQL query for monthly transaction trends (lowercase columns)
         sql_query = """
         WITH combined_transactions AS (
             SELECT 
-                "INBOUND_DATE" as transaction_date,
+                inbound_date as transaction_date,
                 'INBOUND' as transaction_type,
-                "NET_QUANTITY_MT" as net_quantity_mt
+                net_quantity_mt as net_quantity_mt
             FROM inbound
             UNION ALL
             SELECT 
-                "OUTBOUND_DATE" as transaction_date,
+                outbound_date as transaction_date,
                 'OUTBOUND' as transaction_type,
-                "NET_QUANTITY_MT" as net_quantity_mt
+                net_quantity_mt as net_quantity_mt
             FROM outbound
         ),
         monthly_data AS (
@@ -237,17 +236,17 @@ def create_ranking_chart(db, query: str) -> Dict[str, Any]:
     """Create ranking/top N visualizations"""
     try:
         if 'material' in query.lower():
-            # Top materials by volume (uppercase quoted columns)
+            # Top materials by volume (lowercase columns)
             sql_query = """
             WITH combined_transactions AS (
                 SELECT 
-                    "MATERIAL_NAME" as material_name, 
-                    "NET_QUANTITY_MT" as net_quantity_mt 
+                    material_name, 
+                    net_quantity_mt 
                 FROM inbound
                 UNION ALL
                 SELECT 
-                    "MATERIAL_NAME" as material_name, 
-                    "NET_QUANTITY_MT" as net_quantity_mt 
+                    material_name, 
+                    net_quantity_mt 
                 FROM outbound
             ),
             material_totals AS (
@@ -275,17 +274,17 @@ def create_ranking_chart(db, query: str) -> Dict[str, Any]:
             )
             
         elif 'plant' in query.lower():
-            # Top plants by volume (uppercase quoted columns)
+            # Top plants by volume (lowercase columns)
             sql_query = """
             WITH combined_transactions AS (
                 SELECT 
-                    "PLANT_NAME" as plant_name, 
-                    "NET_QUANTITY_MT" as net_quantity_mt 
+                    plant_name, 
+                    net_quantity_mt 
                 FROM inbound
                 UNION ALL
                 SELECT 
-                    "PLANT_NAME" as plant_name, 
-                    "NET_QUANTITY_MT" as net_quantity_mt 
+                    plant_name, 
+                    net_quantity_mt 
                 FROM outbound
             ),
             plant_totals AS (
@@ -312,17 +311,17 @@ def create_ranking_chart(db, query: str) -> Dict[str, Any]:
             )
             
         else:
-            # Default: top materials (uppercase quoted columns)
+            # Default: top materials (lowercase columns)
             sql_query = """
             WITH combined_transactions AS (
                 SELECT 
-                    "MATERIAL_NAME" as material_name, 
-                    "NET_QUANTITY_MT" as net_quantity_mt 
+                    material_name, 
+                    net_quantity_mt 
                 FROM inbound
                 UNION ALL
                 SELECT 
-                    "MATERIAL_NAME" as material_name, 
-                    "NET_QUANTITY_MT" as net_quantity_mt 
+                    material_name, 
+                    net_quantity_mt 
                 FROM outbound
             ),
             material_totals AS (
@@ -355,14 +354,14 @@ def create_ranking_chart(db, query: str) -> Dict[str, Any]:
 def create_inventory_chart(db, query: str) -> Dict[str, Any]:
     """Create inventory-related visualizations"""
     try:
-        # SQL query for inventory levels by plant (cast text to numeric)
+        # SQL query for inventory levels by plant
         sql_query = """
         SELECT 
-            "PLANT_NAME" as plant_name,
-            SUM("UNRESTRICTED_STOCK") as total_inventory
+            plant_name,
+            SUM(unrestricted_stock) as total_inventory
         FROM inventory
-        WHERE "UNRESTRICTED_STOCK" > 0
-        GROUP BY "PLANT_NAME"
+        WHERE unrestricted_stock > 0
+        GROUP BY plant_name
         ORDER BY total_inventory DESC;
         """
         
@@ -388,13 +387,13 @@ def create_cost_chart(db, query: str) -> Dict[str, Any]:
     """Create cost-related visualizations"""
     try:
         if 'storage' in query.lower():
-            # Storage costs by plant (uppercase quoted columns)
+            # Storage costs by plant (lowercase columns)
             sql_query = """
             SELECT 
-                "ENTITY_NAME" as plant_name,
-                "COST_AMOUNT" as storage_cost
+                entity_name as plant_name,
+                cost_amount as storage_cost
             FROM operation_costs
-            WHERE "COST_TYPE" = 'inventory_storage'
+            WHERE cost_type = 'inventory_storage'
             ORDER BY storage_cost DESC;
             """
             
@@ -412,13 +411,13 @@ def create_cost_chart(db, query: str) -> Dict[str, Any]:
             )
             
         elif 'transfer' in query.lower():
-            # Transfer costs by transport mode (uppercase quoted columns)
+            # Transfer costs by transport mode (lowercase columns)
             sql_query = """
             SELECT 
-                "ENTITY_NAME" as transport_mode,
-                "COST_AMOUNT" as transfer_cost
+                entity_name as transport_mode,
+                cost_amount as transfer_cost
             FROM operation_costs
-            WHERE "COST_TYPE" = 'truck_transfer'
+            WHERE cost_type = 'truck_transfer'
             ORDER BY transfer_cost DESC;
             """
             
@@ -436,13 +435,13 @@ def create_cost_chart(db, query: str) -> Dict[str, Any]:
             )
             
         else:
-            # Default storage costs (uppercase quoted columns)
+            # Default storage costs (lowercase columns)
             sql_query = """
             SELECT 
-                "ENTITY_NAME" as plant_name,
-                "COST_AMOUNT" as storage_cost
+                entity_name as plant_name,
+                cost_amount as storage_cost
             FROM operation_costs
-            WHERE "COST_TYPE" = 'inventory_storage'
+            WHERE cost_type = 'inventory_storage'
             ORDER BY storage_cost DESC;
             """
             
