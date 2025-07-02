@@ -127,7 +127,12 @@ def main():
             elif message["type"] == "plotly":
                 st.plotly_chart(message["content"], use_container_width=True, key=f"plotly_{idx}_{id(message)}")
             elif message["type"] == "dataframe":
-                st.dataframe(message["content"], use_container_width=True)
+                if message["content"] is not None and not message["content"].empty:
+                    st.dataframe(message["content"], use_container_width=True)
+            elif message["type"] == "sql_query":
+                if message["content"] and message["content"] != "No SQL query captured":
+                    with st.expander("🔍 SQL Query Used"):
+                        st.code(message["content"], language="sql")
     
     # Chat input
     user_input = st.chat_input("Ask me about your supply chain data...")
@@ -183,6 +188,32 @@ def main():
                             {"role": "assistant", "type": "dataframe", "content": response["dataframe"]}
                         ])
                         log_streamlit_event("response_dataframe", {"text_length": len(response["text"])})
+                    
+                    elif response["type"] == "text_with_sql_and_dataframe":
+                        # Display natural language answer
+                        st.markdown(response["text"])
+                        
+                        # Display DataFrame if available
+                        if response["dataframe"] is not None and not response["dataframe"].empty:
+                            st.subheader("📊 Raw Data Results")
+                            st.dataframe(response["dataframe"], use_container_width=True)
+                        
+                        # Display SQL query in expandable section
+                        if response["sql_query"] and response["sql_query"] != "No SQL query captured":
+                            with st.expander("🔍 SQL Query Used"):
+                                st.code(response["sql_query"], language="sql")
+                        
+                        # Store in message history
+                        st.session_state.messages.extend([
+                            {"role": "assistant", "type": "text", "content": response["text"]},
+                            {"role": "assistant", "type": "dataframe", "content": response["dataframe"]},
+                            {"role": "assistant", "type": "sql_query", "content": response["sql_query"]}
+                        ])
+                        log_streamlit_event("response_sql_and_dataframe", {
+                            "text_length": len(response["text"]),
+                            "dataframe_shape": response["dataframe"].shape if response["dataframe"] is not None else None,
+                            "sql_length": len(response["sql_query"]) if response["sql_query"] else 0
+                        })
                     
                     elif response["type"] == "error":
                         st.error(f"❌ {response['content']}")

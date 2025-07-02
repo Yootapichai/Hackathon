@@ -31,6 +31,45 @@ from .logger import (
 
 load_dotenv()
 
+class QueryCapturingSQLDatabase(SQLDatabase):
+    """Custom SQLDatabase wrapper that captures executed queries"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_executed_query = None
+        self.last_query_result = None
+    
+    def run(self, command: str, fetch: str = "all", **kwargs) -> str:
+        """Override run method to capture queries"""
+        try:
+            # Store the query being executed
+            self.last_executed_query = command.strip()
+            
+            # Execute the query using parent method with all parameters
+            result = super().run(command, fetch, **kwargs)
+            
+            # Store the result
+            self.last_query_result = result
+            
+            return result
+        except Exception as e:
+            # Reset on error
+            self.last_executed_query = None
+            self.last_query_result = None
+            raise e
+    
+    def get_last_query_info(self):
+        """Get the last executed query and its results"""
+        return {
+            "query": self.last_executed_query,
+            "result": self.last_query_result
+        }
+    
+    def clear_query_cache(self):
+        """Clear stored query information"""
+        self.last_executed_query = None
+        self.last_query_result = None
+
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
@@ -109,30 +148,38 @@ class SupplyChainAgent:
             # PostgreSQL connection string for Supabase
             db_uri = f"postgresql://postgres:{supabase_password}@db.{project_id}.supabase.co:5432/postgres"
             
-            return SQLDatabase.from_uri(db_uri)
+            return QueryCapturingSQLDatabase.from_uri(db_uri)
         except Exception as e:
             log_error(e, {"component": "database_connection"})
             raise
     
     def _setup_tools(self):
         @tool
-        def analyze_supply_chain_data(query: str) -> str:
-            """Analyze supply chain data using SQL queries. Use this for data analysis questions."""
+        def analyze_supply_chain_data(query: str) -> Dict[str, Any]:
+            """Analyze supply chain data using SQL queries. Returns SQL, DataFrame, and natural language answer."""
             
             start_time = time.time()
             log_tool_call("analyze_supply_chain_data", query)
             
             try:
+                # Clear previous query cache
+                self.db.clear_query_cache()
+                
                 # Enhanced system prompt for SQL agent with business context
                 system_prefix = """
 You are an expert supply chain data analyst with access to a PostgreSQL database containing:
 
 Tables:
-- material_master: Material information (material_name, polymer_type, shelf_life_in_month, downgrade_value_lost_percent)
-- inventory: Current stock levels (balance_as_of_date, plant_name, material_name, batch_number, unrestricted_stock, stock_unit, stock_sell_value, currency)
-- inbound: Incoming shipments (inbound_date, plant_name, material_name, net_quantity_mt)
-- outbound: Outgoing shipments (outbound_date, plant_name, material_name, customer_number, mode_of_transport, net_quantity_mt)
-- operation_costs: Storage and transfer costs (operation_category, cost_type, entity_name, entity_type, cost_amount, cost_unit, container_capacity_mt, currency)
+- material_master: Material information ("MATERIAL_NAME", "POLYMER_TYPE", "SHELF_LIFE_IN_MONTH", "DOWNGRADE_VALUE_LOST_PERCENT")
+- inventory: Current stock levels ("BALANCE_AS_OF_DATE", "PLANT_NAME", "MATERIAL_NAME", "BATCH_NUMBER", "UNRESTRICTED_STOCK", "STOCK_UNIT", "STOCK_SELL_VALUE", "CURRENCY")
+- inbound: Incoming shipments ("INBOUND_DATE", "PLANT_NAME", "MATERIAL_NAME", "NET_QUANTITY_MT")
+- outbound: Outgoing shipments ("OUTBOUND_DATE", "PLANT_NAME", "MATERIAL_NAME", "CUSTOMER_NUMBER", "MODE_OF_TRANSPORT", "NET_QUANTITY_MT")
+- operation_costs: Storage and transfer costs ("OPERATION_CATEGORY", "COST_TYPE", "ENTITY_NAME", "ENTITY_TYPE", "COST_AMOUNT", "COST_UNIT", "CONTAINER_CAPACITY_MT", "CURRENCY")
+
+CRITICAL SQL Rules:
+- ALWAYS use double quotes around ALL column names exactly as shown above
+- Column names are case-sensitive - use the exact format listed
+- Example: SELECT "MATERIAL_NAME", SUM("NET_QUANTITY_MT") FROM outbound
 
 Key Business Rules:
 - Stock quantities are in KG for inventory, MT for inbound/outbound
@@ -172,17 +219,44 @@ Always provide actionable insights and consider business context in your analysi
                 # Use memory-aware invocation
                 result = agent.invoke({"input": query})["output"]
                 
+                # Get the captured SQL query and create DataFrame
+                query_info = self.db.get_last_query_info()
+                sql_query = query_info.get("query", "No SQL query captured")
+                
+                # Create DataFrame from the executed query if available
+                dataframe = None
+                if sql_query and sql_query != "No SQL query captured":
+                    try:
+                        # Execute the same query to get DataFrame
+                        dataframe = pd.read_sql_query(sql_query, self.db._engine)
+                        log_dataframe_operation("sql_query_result", "captured", dataframe.shape)
+                    except Exception as df_error:
+                        log_error(df_error, {"context": "dataframe_creation", "sql": sql_query})
+                        # If DataFrame creation fails, still return the text result
+                        pass
+                
                 execution_time = time.time() - start_time
-                log_tool_result("analyze_supply_chain_data", "text", True)
+                log_tool_result("analyze_supply_chain_data", "enhanced_sql_response", True)
                 log_tool_call("analyze_supply_chain_data", query, execution_time)
                 
-                return result
+                # Return structured response
+                return {
+                    "type": "text_with_sql_and_dataframe",
+                    "text": result,
+                    "sql_query": sql_query,
+                    "dataframe": dataframe
+                }
                 
             except Exception as e:
                 execution_time = time.time() - start_time
                 log_tool_result("analyze_supply_chain_data", "error", False, str(e))
                 log_error(e, {"tool": "analyze_supply_chain_data", "query": query})
-                return f"Error analyzing data: {str(e)}"
+                
+                # Return error as text-only response
+                return {
+                    "type": "text",
+                    "content": f"Error analyzing data: {str(e)}"
+                }
         
         @tool 
         def create_visualization(query: str) -> Dict[str, Any]:
@@ -591,23 +665,40 @@ Always provide actionable insights and consider business context in your analysi
             
             # For data analysis questions and conversation memory
             else:
-                # Use LangGraph with persistent memory
-                response = self.app.invoke(
-                    {"messages": [HumanMessage(content=query)]},
-                    config=config
-                )
+                # Use enhanced SQL tool that captures query and DataFrame
+                analysis_result = self.analyze_tool.invoke(query)
                 
-                final_answer = response["messages"][-1].content
                 processing_time = time.time() - start_time
-                log_agent_response("text", len(final_answer), processing_time)
                 
-                # Store in LangChain memory for pandas agent context
-                self.memory.save_context(
-                    {"input": query},
-                    {"output": final_answer}
-                )
-                
-                return {"type": "text", "content": final_answer}
+                # Handle the enhanced response with SQL and DataFrame
+                if isinstance(analysis_result, dict) and analysis_result.get("type") == "text_with_sql_and_dataframe":
+                    log_agent_response("text_with_sql_and_dataframe", len(analysis_result["text"]), processing_time)
+                    
+                    # Store in LangChain memory for context
+                    self.memory.save_context(
+                        {"input": query},
+                        {"output": analysis_result["text"]}
+                    )
+                    
+                    return analysis_result
+                    
+                # Handle error responses
+                elif isinstance(analysis_result, dict) and analysis_result.get("type") == "text":
+                    log_agent_response("error", len(analysis_result["content"]), processing_time)
+                    return {"type": "error", "content": analysis_result["content"]}
+                    
+                # Fallback for unexpected response format
+                else:
+                    # If tool returns just text (old format), wrap it
+                    response_text = str(analysis_result)
+                    log_agent_response("text", len(response_text), processing_time)
+                    
+                    self.memory.save_context(
+                        {"input": query},
+                        {"output": response_text}
+                    )
+                    
+                    return {"type": "text", "content": response_text}
                 
         except Exception as e:
             processing_time = time.time() - start_time
