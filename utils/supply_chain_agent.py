@@ -59,7 +59,7 @@ class SupplyChainAgent:
             
             # Initialize LLM
             self.llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-flash",
                 google_api_key=self.google_api_key,
                 temperature=0.0,
                 verbose=True
@@ -98,7 +98,15 @@ class SupplyChainAgent:
     
     def _setup_tools(self):
         """Setup tools using the tools module"""
-        self.analyze_tool, self.visualize_tool = create_supply_chain_tools(
+        (
+            self.analyze_tool,
+            self.sql_tool,
+            self.bar_chart_tool,
+            self.line_chart_tool,
+            self.scatter_plot_tool,
+            self.histogram_tool,
+            self.monthly_trends_tool
+        ) = create_supply_chain_tools(
             db=self.db,
             llm=self.llm,
             memory=self.memory
@@ -106,9 +114,19 @@ class SupplyChainAgent:
     
     def _setup_agent(self):
         """Setup the LangGraph agent with proper memory management"""
+        tools = [
+            self.analyze_tool,
+            self.sql_tool,
+            self.bar_chart_tool,
+            self.line_chart_tool,
+            self.scatter_plot_tool,
+            self.histogram_tool,
+            self.monthly_trends_tool
+        ]
+        
         agent_node = create_react_agent(
             model=self.llm,
-            tools=[self.analyze_tool, self.visualize_tool]
+            tools=tools
         )
         
         graph = StateGraph(AgentState)
@@ -134,74 +152,176 @@ class SupplyChainAgent:
         log_query(query)
         
         try:
+            # Clear any previous query cache to avoid stale data
+            self.db.clear_query_cache()
+            
             # Create thread configuration for session persistence
             config = {"configurable": {"thread_id": thread_id}}
             
-            # Determine if this is a visualization request
-            visualization_keywords = ['plot', 'chart', 'graph', 'show', 'visualize', 'display']
-            is_viz_request = any(keyword in query.lower() for keyword in visualization_keywords)
+            # Let the LLM agent decide which tools to use based on the query
+            messages = [HumanMessage(content=query)]
+            result = self.app.invoke({"messages": messages}, config)
             
-            if is_viz_request:
-                # Handle visualization requests directly
-                viz_result = self.visualize_tool.invoke(query)
-                if viz_result["type"] == "plotly":
-                    response = {
-                        "type": "text_with_chart",
-                        "text": f"Here's a visualization based on your request: {viz_result['description']}",
-                        "chart": viz_result["chart"]
-                    }
-                    processing_time = time.time() - start_time
-                    log_agent_response("text_with_chart", len(response["text"]), processing_time)
-                    
-                    # Store in LangChain memory for context
-                    self.memory.save_context(
-                        {"input": query},
-                        {"output": response["text"]}
-                    )
-                    
-                    return response
-                else:
-                    error_msg = viz_result.get("message", "Error creating visualization")
-                    processing_time = time.time() - start_time
-                    log_agent_response("error", len(error_msg), processing_time)
-                    return {"type": "error", "content": error_msg}
+            processing_time = time.time() - start_time
             
-            # For data analysis questions and conversation memory
+            # Extract final response text
+            final_message = result["messages"][-1]
+            response_text = final_message.content if hasattr(final_message, 'content') else str(final_message)
+            
+            # Check for tool calls in the conversation to extract charts and SQL data
+            chart_data = None
+            sql_query = "No SQL query captured"
+            dataframe = None
+            
+            # Debug: Log the full result structure
+            log_agent_response(f"langgraph_messages_count_{len(result['messages'])}", 0, 0)
+            
+            # Find the index of the current user message (the one we just sent)
+            user_message_index = -1
+            for i, msg in enumerate(result["messages"]):
+                if hasattr(msg, 'content') and msg.content == query:
+                    user_message_index = i
+                    break
+            
+            # Only look at messages AFTER the current user input
+            if user_message_index >= 0:
+                current_request_messages = result["messages"][user_message_index + 1:]
             else:
-                # Use enhanced SQL tool that captures query and DataFrame
-                analysis_result = self.analyze_tool.invoke(query)
+                # Fallback: just look at the last few messages
+                current_request_messages = result["messages"][-4:] if len(result["messages"]) > 4 else result["messages"]
+            
+            log_agent_response(f"processing_messages_from_index_{user_message_index}", len(current_request_messages), 0)
+            
+            for i, msg in enumerate(current_request_messages):
+                # Debug logging
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        log_agent_response(f"found_tool_call_{tc['name']}", 0, 0)
                 
-                processing_time = time.time() - start_time
-                
-                # Handle the enhanced response with SQL and DataFrame
-                if isinstance(analysis_result, dict) and analysis_result.get("type") == "text_with_sql_and_dataframe":
-                    log_agent_response("text_with_sql_and_dataframe", len(analysis_result["text"]), processing_time)
-                    
-                    # Store in LangChain memory for context
-                    self.memory.save_context(
-                        {"input": query},
-                        {"output": analysis_result["text"]}
-                    )
-                    
-                    return analysis_result
-                    
-                # Handle error responses
-                elif isinstance(analysis_result, dict) and analysis_result.get("type") == "text":
-                    log_agent_response("error", len(analysis_result["content"]), processing_time)
-                    return {"type": "error", "content": analysis_result["content"]}
-                    
-                # Fallback for unexpected response format
-                else:
-                    # If tool returns just text (old format), wrap it
-                    response_text = str(analysis_result)
-                    log_agent_response("text", len(response_text), processing_time)
-                    
-                    self.memory.save_context(
-                        {"input": query},
-                        {"output": response_text}
-                    )
-                    
-                    return {"type": "text", "content": response_text}
+                # Check for analyze_supply_chain_data tool calls
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tool_call in msg.tool_calls:
+                        if tool_call['name'] == 'analyze_supply_chain_data':
+                            # Find the corresponding tool response
+                            if i + 1 < len(current_request_messages):
+                                next_msg = current_request_messages[i + 1]
+                                if hasattr(next_msg, 'content'):
+                                    try:
+                                        # The content might be a string representation of the dict
+                                        import ast
+                                        if isinstance(next_msg.content, str) and next_msg.content.startswith('{'):
+                                            tool_result = ast.literal_eval(next_msg.content)
+                                        else:
+                                            tool_result = next_msg.content
+                                        
+                                        if isinstance(tool_result, dict):
+                                            sql_query = tool_result.get('sql_query', 'No SQL query captured')
+                                            dataframe = tool_result.get('dataframe')
+                                    except:
+                                        # If parsing fails, try to get from database cache
+                                        query_info = self.db.get_last_query_info()
+                                        sql_query = query_info.get("query", "No SQL query captured")
+                                        if sql_query and sql_query != "No SQL query captured":
+                                            try:
+                                                import pandas as pd
+                                                dataframe = pd.read_sql_query(sql_query, self.db._engine)
+                                            except:
+                                                pass
+                        
+                        # Check for chart tool calls
+                        elif tool_call['name'] in ['create_bar_chart', 'create_line_chart', 'create_scatter_plot', 'create_histogram', 'plot_monthly_transaction_trends']:
+                            # Find the corresponding tool response
+                            if i + 1 < len(current_request_messages):
+                                next_msg = current_request_messages[i + 1]
+                                if hasattr(next_msg, 'content'):
+                                    log_agent_response(f"chart_tool_response_type_{type(next_msg.content)}", 0, 0)
+                                    try:
+                                        import ast
+                                        if isinstance(next_msg.content, str) and next_msg.content.startswith('{'):
+                                            tool_result = ast.literal_eval(next_msg.content)
+                                            log_agent_response(f"parsed_tool_result_type_{tool_result.get('type')}", 0, 0)
+                                            if isinstance(tool_result, dict) and tool_result.get('type') == 'plotly':
+                                                # Convert JSON back to Plotly figure
+                                                try:
+                                                    import plotly.io as pio
+                                                    chart_json = tool_result.get('chart')
+                                                    if isinstance(chart_json, str):
+                                                        chart_fig = pio.from_json(chart_json)
+                                                        tool_result['chart'] = chart_fig
+                                                    chart_data = tool_result
+                                                except Exception as chart_error:
+                                                    log_error(chart_error, {"context": "chart_reconstruction"})
+                                                    chart_data = tool_result  # Use as-is if conversion fails
+                                    except:
+                                        pass
+            
+            # Store in memory
+            self.memory.save_context(
+                {"input": query},
+                {"output": response_text}
+            )
+            
+            # Check if this was a chart request by looking for chart-related keywords and tool calls
+            chart_keywords = ['plot', 'chart', 'graph', 'trend', 'visuali']
+            is_chart_request = any(keyword in query.lower() for keyword in chart_keywords)
+            
+            # If it's a chart request but we didn't extract chart data, try calling the tool directly
+            # BUT only if we don't already have SQL/dataframe from analyze_supply_chain_data
+            if is_chart_request and not chart_data and sql_query == "No SQL query captured":
+                log_agent_response("attempting_direct_chart_call", 0, 0)
+                if 'monthly' in query.lower() and ('trend' in query.lower() or 'transaction' in query.lower()):
+                    try:
+                        direct_chart = self.monthly_trends_tool.invoke({})
+                        if direct_chart.get('type') == 'plotly':
+                            # Convert JSON to Plotly figure
+                            import plotly.io as pio
+                            chart_json = direct_chart.get('chart')
+                            if isinstance(chart_json, str):
+                                chart_fig = pio.from_json(chart_json)
+                                chart_data = {
+                                    "type": "plotly",
+                                    "chart": chart_fig,
+                                    "description": direct_chart.get("description", "Monthly trends chart")
+                                }
+                                
+                                # Also get the SQL query and dataframe from the tool execution
+                                query_info = self.db.get_last_query_info()
+                                if query_info.get("query"):
+                                    sql_query = query_info["query"]
+                                    try:
+                                        import pandas as pd
+                                        dataframe = pd.read_sql_query(sql_query, self.db._engine)
+                                    except Exception as df_error:
+                                        log_error(df_error, {"context": "direct_chart_dataframe"})
+                                
+                                log_agent_response("direct_chart_success", 0, 0)
+                    except Exception as e:
+                        log_error(e, {"context": "direct_chart_call"})
+            
+            # Return appropriate format based on what was found
+            if chart_data:
+                log_agent_response("text_with_chart", len(response_text), processing_time)
+                return {
+                    "type": "text_with_chart",
+                    "text": response_text,
+                    "chart": chart_data.get("chart"),
+                    "sql_query": sql_query,
+                    "dataframe": dataframe
+                }
+            elif dataframe is not None or sql_query != "No SQL query captured":
+                log_agent_response("text_with_sql_and_dataframe", len(response_text), processing_time)
+                return {
+                    "type": "text_with_sql_and_dataframe",
+                    "text": response_text,
+                    "sql_query": sql_query,
+                    "dataframe": dataframe
+                }
+            else:
+                log_agent_response("text", len(response_text), processing_time)
+                return {
+                    "type": "text",
+                    "content": response_text
+                }
                 
         except Exception as e:
             processing_time = time.time() - start_time

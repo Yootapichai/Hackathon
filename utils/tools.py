@@ -1,14 +1,16 @@
 """
-Supply Chain Analysis Tools
+Dynamic Supply Chain Analysis Tools
 
-This module contains LangChain tools for analyzing supply chain data and creating visualizations.
-Separated from the main agent for better code organization and maintainability.
+This module contains LangChain tools for analyzing supply chain data with dynamic, 
+LLM-driven chart generation. The LLM chooses appropriate chart types and data 
+based on user context rather than keyword matching.
 """
 
 import time
 import pandas as pd
 import plotly.express as px
-from typing import Dict, Any
+import plotly.graph_objects as go
+from typing import Dict, Any, Optional
 from langchain.tools import tool
 from .logger import log_tool_call, log_tool_result, log_error, log_dataframe_operation, log_visualization
 
@@ -23,7 +25,7 @@ def create_supply_chain_tools(db, llm, memory):
         memory: ConversationBufferWindowMemory instance
     
     Returns:
-        tuple: (analyze_tool, visualize_tool)
+        tuple: (analyze_tool, sql_tool, bar_tool, line_tool, scatter_tool, histogram_tool)
     """
     
     @tool
@@ -62,6 +64,12 @@ Key Business Rules:
 - Materials have shelf life and degradation rates
 
 Always provide actionable insights and consider business context in your analysis.
+
+IMPORTANT FOR CHARTS: When user requests charts/visualizations:
+1. First use analyze_supply_chain_data to get the data
+2. Then use the appropriate chart tool with data_query='use_last'
+3. Never create SQL queries for chart tools - use existing analyzed data
+
 Your answer must end with smile emoji
 """
             
@@ -133,358 +141,585 @@ Your answer must end with smile emoji
                 "content": f"Error analyzing data: {str(e)}"
             }
     
-    @tool 
-    def create_visualization(query: str) -> Dict[str, Any]:
-        """Create Plotly visualizations for supply chain data. Use this when users ask for charts, plots, or visual analysis."""
+    @tool
+    def execute_sql_for_chart(sql_query: str) -> Dict[str, Any]:
+        """
+        Execute a custom PostgreSQL query and return the results as a DataFrame for chart creation.
+        Use this tool to get data for visualization when you need specific data combinations.
         
+        IMPORTANT: This uses PostgreSQL syntax, NOT SQLite. Use PostgreSQL functions like:
+        - DATE_TRUNC() for date truncation
+        - TO_CHAR() for date formatting
+        - EXTRACT() for date parts
+        
+        Args:
+            sql_query: The PostgreSQL SQL query to execute
+            
+        Returns:
+            Dict with DataFrame data or error message
+        """
         start_time = time.time()
-        log_tool_call("create_visualization", query)
+        
+        # Debug logging
+        log_tool_call("execute_sql_for_chart", f"Type: {type(sql_query)}, Value: {str(sql_query)[:100]}")
         
         try:
-            # Determine what type of visualization is needed
-            query_lower = query.lower()
+            # Ensure sql_query is a string (handle immutabledict from LangGraph)
+            if hasattr(sql_query, 'get'):
+                # If it's a dict-like object, extract the actual query
+                sql_query = str(sql_query)
+            elif not isinstance(sql_query, str):
+                sql_query = str(sql_query)
             
-            if any(word in query_lower for word in ['trend', 'time', 'monthly', 'daily', 'over time']):
-                result = create_time_series_chart(db, query)
-            elif any(word in query_lower for word in ['top', 'highest', 'largest', 'ranking']):
-                result = create_ranking_chart(db, query)
-            elif any(word in query_lower for word in ['inventory', 'stock', 'levels']):
-                result = create_inventory_chart(db, query)
-            elif any(word in query_lower for word in ['cost', 'expense', 'storage', 'transfer']):
-                result = create_cost_chart(db, query)
-            else:
-                result = create_general_chart(db, query)
+            # Execute the SQL query
+            df = pd.read_sql_query(sql_query, db._engine)
             
             execution_time = time.time() - start_time
+            log_dataframe_operation("sql_chart_query", "executed", df.shape)
+            log_tool_result("execute_sql_for_chart", "success", True)
+            log_tool_call("execute_sql_for_chart", sql_query, execution_time)
             
-            if result["type"] == "plotly":
-                log_visualization(result.get("description", "unknown"), 0, True)
-                log_tool_result("create_visualization", "plotly", True)
-            else:
-                log_tool_result("create_visualization", "error", False, result.get("message"))
-            
-            log_tool_call("create_visualization", query, execution_time)
-            return result
+            return {
+                "type": "dataframe",
+                "data": df,
+                "sql_query": sql_query,
+                "shape": df.shape
+            }
             
         except Exception as e:
             execution_time = time.time() - start_time
-            log_tool_result("create_visualization", "error", False, str(e))
-            log_error(e, {"tool": "create_visualization", "query": query})
-            return {"type": "error", "message": f"Error creating visualization: {str(e)}"}
+            log_tool_result("execute_sql_for_chart", "error", False, str(e))
+            log_error(e, {"tool": "execute_sql_for_chart", "sql": sql_query})
+            
+            return {
+                "type": "error",
+                "message": f"Error executing SQL query: {str(e)}. Query was: {sql_query[:200]}..."
+            }
     
-    return analyze_supply_chain_data, create_visualization
-
-
-def create_time_series_chart(db, query: str) -> Dict[str, Any]:
-    """Create time-series visualizations"""
-    try:
-        # SQL query for monthly transaction trends (lowercase columns)
-        sql_query = """
-        WITH combined_transactions AS (
-            SELECT 
-                inbound_date as transaction_date,
-                'INBOUND' as transaction_type,
-                net_quantity_mt as net_quantity_mt
-            FROM inbound
+    @tool
+    def create_bar_chart(
+        data_query: str,
+        x_column: str, 
+        y_column: str, 
+        title: str,
+        color_column: Optional[str] = None,
+        orientation: str = "v"
+    ) -> Dict[str, Any]:
+        """
+        Create a bar chart visualization from supply chain data. Use this when the user asks for:
+        - Bar charts, bar graphs, or bar plots
+        - Comparing quantities, costs, or counts across categories
+        - Ranking data (top plants, materials, etc.)
+        - Any categorical comparison visualization
+        
+        Args:
+            data_query: SQL query to get the data, or 'use_last' to use last query result
+            x_column: Column name for x-axis (categories)
+            y_column: Column name for y-axis (values)
+            title: Chart title
+            color_column: Optional column for color coding bars
+            orientation: 'v' for vertical, 'h' for horizontal bars
+            
+        Returns:
+            Dict with Plotly chart or error message
+        """
+        start_time = time.time()
+        
+        # Ensure all parameters are strings (handle immutabledict from LangGraph)
+        data_query = str(data_query) if not isinstance(data_query, str) else data_query
+        x_column = str(x_column) if not isinstance(x_column, str) else x_column
+        y_column = str(y_column) if not isinstance(y_column, str) else y_column
+        title = str(title) if not isinstance(title, str) else title
+        
+        log_tool_call("create_bar_chart", f"{title} | {x_column} vs {y_column}")
+        
+        try:
+            # Ensure data_query is a string (handle immutabledict from LangGraph)
+            if hasattr(data_query, 'get'):
+                data_query = str(data_query)
+            elif not isinstance(data_query, str):
+                data_query = str(data_query)
+            
+            # Get data  
+            if data_query == "use_last":
+                query_info = db.get_last_query_info()
+                if not query_info.get("query"):
+                    return {"type": "error", "message": "No previous query to use"}
+                df = pd.read_sql_query(query_info["query"], db._engine)
+            elif data_query.startswith("SELECT") or data_query.startswith("WITH"):
+                # It's a SQL query - but validate it first
+                try:
+                    df = pd.read_sql_query(data_query, db._engine)
+                except Exception as sql_error:
+                    # SQL failed, fall back to using last query
+                    log_error(sql_error, {"context": "chart_sql_fallback", "sql": data_query[:200]})
+                    query_info = db.get_last_query_info()
+                    if query_info.get("query"):
+                        df = pd.read_sql_query(query_info["query"], db._engine)
+                    else:
+                        return {"type": "error", "message": f"SQL query failed and no previous data available: {str(sql_error)}"}
+            else:
+                # It might be malformed, try to use last query instead
+                query_info = db.get_last_query_info()
+                if query_info.get("query"):
+                    df = pd.read_sql_query(query_info["query"], db._engine)
+                else:
+                    return {"type": "error", "message": f"Invalid data_query. Use 'use_last' to use existing data, or provide valid SQL. Got: {data_query[:100]}"}
+            
+            if df.empty:
+                return {"type": "error", "message": "No data found for bar chart"}
+            
+            # Validate columns exist
+            if x_column not in df.columns:
+                return {"type": "error", "message": f"Column '{x_column}' not found in data"}
+            if y_column not in df.columns:
+                return {"type": "error", "message": f"Column '{y_column}' not found in data"}
+            
+            # Create bar chart
+            fig = px.bar(
+                df,
+                x=x_column if orientation == "v" else y_column,
+                y=y_column if orientation == "v" else x_column,
+                color=color_column if color_column and color_column in df.columns else None,
+                title=title,
+                orientation=orientation
+            )
+            
+            # Improve layout
+            fig.update_layout(
+                xaxis_tickangle=-45 if orientation == "v" else 0,
+                showlegend=bool(color_column)
+            )
+            
+            execution_time = time.time() - start_time
+            log_visualization("bar_chart", len(df), True)
+            log_tool_result("create_bar_chart", "success", True)
+            log_tool_call("create_bar_chart", title, execution_time)
+            
+            return {
+                "type": "plotly",
+                "chart": fig.to_json(),  # Convert to JSON for LangGraph compatibility
+                "description": f"Bar chart: {title}"
+            }
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            log_tool_result("create_bar_chart", "error", False, str(e))
+            log_error(e, {"tool": "create_bar_chart", "title": title})
+            return {"type": "error", "message": f"Error creating bar chart: {str(e)}"}
+    
+    @tool
+    def create_line_chart(
+        data_query: str,
+        x_column: str,
+        y_column: str, 
+        title: str,
+        color_column: Optional[str] = None,
+        sort_by_x: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Create a line chart visualization from supply chain data. Use this when the user asks for:
+        - Line charts, line graphs, or line plots
+        - Time series analysis (trends over time)
+        - Monthly, daily, or weekly trends
+        - Plotting trends, patterns, or changes over time
+        - Any time-based or sequential data visualization
+        
+        IMPORTANT: For monthly transaction trends, first use analyze_supply_chain_data to get the data,
+        then use data_query='use_last' to create the chart from that data.
+        
+        Args:
+            data_query: Use 'use_last' to chart the most recent analyze_supply_chain_data result (RECOMMENDED)
+            x_column: Column name for x-axis (usually time/date or sequential data)  
+            y_column: Column name for y-axis (numeric values to track)
+            title: Chart title
+            color_column: Optional column for multiple lines with different colors
+            sort_by_x: Whether to sort data by x-axis values
+            
+        Returns:
+            Dict with Plotly chart or error message
+        """
+        start_time = time.time()
+        
+        # Ensure all parameters are strings (handle immutabledict from LangGraph)
+        data_query = str(data_query) if not isinstance(data_query, str) else data_query
+        x_column = str(x_column) if not isinstance(x_column, str) else x_column
+        y_column = str(y_column) if not isinstance(y_column, str) else y_column
+        title = str(title) if not isinstance(title, str) else title
+        
+        log_tool_call("create_line_chart", f"{title} | {x_column} vs {y_column}")
+        
+        try:
+            # Ensure data_query is a string (handle immutabledict from LangGraph)
+            if hasattr(data_query, 'get'):
+                data_query = str(data_query)
+            elif not isinstance(data_query, str):
+                data_query = str(data_query)
+            
+            # Get data  
+            if data_query == "use_last":
+                query_info = db.get_last_query_info()
+                if not query_info.get("query"):
+                    return {"type": "error", "message": "No previous query to use"}
+                df = pd.read_sql_query(query_info["query"], db._engine)
+            elif data_query.startswith("SELECT") or data_query.startswith("WITH"):
+                # It's a SQL query - but validate it first
+                try:
+                    df = pd.read_sql_query(data_query, db._engine)
+                except Exception as sql_error:
+                    # SQL failed, fall back to using last query
+                    log_error(sql_error, {"context": "chart_sql_fallback", "sql": data_query[:200]})
+                    query_info = db.get_last_query_info()
+                    if query_info.get("query"):
+                        df = pd.read_sql_query(query_info["query"], db._engine)
+                    else:
+                        return {"type": "error", "message": f"SQL query failed and no previous data available: {str(sql_error)}"}
+            else:
+                # It might be malformed, try to use last query instead
+                query_info = db.get_last_query_info()
+                if query_info.get("query"):
+                    df = pd.read_sql_query(query_info["query"], db._engine)
+                else:
+                    return {"type": "error", "message": f"Invalid data_query. Use 'use_last' to use existing data, or provide valid SQL. Got: {data_query[:100]}"}
+            
+            if df.empty:
+                return {"type": "error", "message": "No data found for line chart"}
+            
+            # Validate columns exist
+            if x_column not in df.columns:
+                return {"type": "error", "message": f"Column '{x_column}' not found in data"}
+            if y_column not in df.columns:
+                return {"type": "error", "message": f"Column '{y_column}' not found in data"}
+            
+            # Sort data if requested
+            if sort_by_x:
+                df = df.sort_values(by=x_column)
+            
+            # Create line chart
+            fig = px.line(
+                df,
+                x=x_column,
+                y=y_column,
+                color=color_column if color_column and color_column in df.columns else None,
+                title=title,
+                markers=True
+            )
+            
+            # Improve layout
+            fig.update_layout(
+                xaxis_tickangle=-45,
+                showlegend=bool(color_column)
+            )
+            
+            execution_time = time.time() - start_time
+            log_visualization("line_chart", len(df), True)
+            log_tool_result("create_line_chart", "success", True)
+            log_tool_call("create_line_chart", title, execution_time)
+            
+            return {
+                "type": "plotly",
+                "chart": fig.to_json(),  # Convert to JSON for LangGraph compatibility
+                "description": f"Line chart: {title}"
+            }
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            log_tool_result("create_line_chart", "error", False, str(e))
+            log_error(e, {"tool": "create_line_chart", "title": title})
+            return {"type": "error", "message": f"Error creating line chart: {str(e)}"}
+    
+    @tool
+    def create_scatter_plot(
+        data_query: str,
+        x_column: str,
+        y_column: str,
+        title: str,
+        color_column: Optional[str] = None,
+        size_column: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a scatter plot from supply chain data to show relationships between variables.
+        
+        Args:
+            data_query: SQL query to get the data, or 'use_last' to use last query result
+            x_column: Column name for x-axis
+            y_column: Column name for y-axis
+            title: Chart title
+            color_column: Optional column for color coding points
+            size_column: Optional column for sizing points
+            
+        Returns:
+            Dict with Plotly chart or error message
+        """
+        start_time = time.time()
+        
+        # Ensure all parameters are strings (handle immutabledict from LangGraph)
+        data_query = str(data_query) if not isinstance(data_query, str) else data_query
+        x_column = str(x_column) if not isinstance(x_column, str) else x_column
+        y_column = str(y_column) if not isinstance(y_column, str) else y_column
+        title = str(title) if not isinstance(title, str) else title
+        
+        log_tool_call("create_scatter_plot", f"{title} | {x_column} vs {y_column}")
+        
+        try:
+            # Ensure data_query is a string (handle immutabledict from LangGraph)
+            if hasattr(data_query, 'get'):
+                data_query = str(data_query)
+            elif not isinstance(data_query, str):
+                data_query = str(data_query)
+            
+            # Get data  
+            if data_query == "use_last":
+                query_info = db.get_last_query_info()
+                if not query_info.get("query"):
+                    return {"type": "error", "message": "No previous query to use"}
+                df = pd.read_sql_query(query_info["query"], db._engine)
+            elif data_query.startswith("SELECT") or data_query.startswith("WITH"):
+                # It's a SQL query - but validate it first
+                try:
+                    df = pd.read_sql_query(data_query, db._engine)
+                except Exception as sql_error:
+                    # SQL failed, fall back to using last query
+                    log_error(sql_error, {"context": "chart_sql_fallback", "sql": data_query[:200]})
+                    query_info = db.get_last_query_info()
+                    if query_info.get("query"):
+                        df = pd.read_sql_query(query_info["query"], db._engine)
+                    else:
+                        return {"type": "error", "message": f"SQL query failed and no previous data available: {str(sql_error)}"}
+            else:
+                # It might be malformed, try to use last query instead
+                query_info = db.get_last_query_info()
+                if query_info.get("query"):
+                    df = pd.read_sql_query(query_info["query"], db._engine)
+                else:
+                    return {"type": "error", "message": f"Invalid data_query. Use 'use_last' to use existing data, or provide valid SQL. Got: {data_query[:100]}"}
+            
+            if df.empty:
+                return {"type": "error", "message": "No data found for scatter plot"}
+            
+            # Validate columns exist
+            if x_column not in df.columns:
+                return {"type": "error", "message": f"Column '{x_column}' not found in data"}
+            if y_column not in df.columns:
+                return {"type": "error", "message": f"Column '{y_column}' not found in data"}
+            
+            # Create scatter plot
+            fig = px.scatter(
+                df,
+                x=x_column,
+                y=y_column,
+                color=color_column if color_column and color_column in df.columns else None,
+                size=size_column if size_column and size_column in df.columns else None,
+                title=title,
+                hover_data=df.columns.tolist()  # Show all columns on hover
+            )
+            
+            # Improve layout
+            fig.update_layout(showlegend=bool(color_column))
+            
+            execution_time = time.time() - start_time
+            log_visualization("scatter_plot", len(df), True)
+            log_tool_result("create_scatter_plot", "success", True)
+            log_tool_call("create_scatter_plot", title, execution_time)
+            
+            return {
+                "type": "plotly",
+                "chart": fig.to_json(),  # Convert to JSON for LangGraph compatibility
+                "description": f"Scatter plot: {title}"
+            }
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            log_tool_result("create_scatter_plot", "error", False, str(e))
+            log_error(e, {"tool": "create_scatter_plot", "title": title})
+            return {"type": "error", "message": f"Error creating scatter plot: {str(e)}"}
+    
+    @tool
+    def create_histogram(
+        data_query: str,
+        column: str,
+        title: str,
+        bins: int = 20,
+        color_column: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a histogram from supply chain data to show distribution of values.
+        
+        Args:
+            data_query: SQL query to get the data, or 'use_last' to use last query result
+            column: Column name to create histogram for
+            title: Chart title
+            bins: Number of bins for the histogram
+            color_column: Optional column for color coding histogram bars
+            
+        Returns:
+            Dict with Plotly chart or error message
+        """
+        start_time = time.time()
+        
+        # Ensure all parameters are strings (handle immutabledict from LangGraph)
+        data_query = str(data_query) if not isinstance(data_query, str) else data_query
+        column = str(column) if not isinstance(column, str) else column
+        title = str(title) if not isinstance(title, str) else title
+        
+        log_tool_call("create_histogram", f"{title} | {column}")
+        
+        try:
+            # Ensure data_query is a string (handle immutabledict from LangGraph)
+            if hasattr(data_query, 'get'):
+                data_query = str(data_query)
+            elif not isinstance(data_query, str):
+                data_query = str(data_query)
+            
+            # Get data  
+            if data_query == "use_last":
+                query_info = db.get_last_query_info()
+                if not query_info.get("query"):
+                    return {"type": "error", "message": "No previous query to use"}
+                df = pd.read_sql_query(query_info["query"], db._engine)
+            elif data_query.startswith("SELECT") or data_query.startswith("WITH"):
+                # It's a SQL query - but validate it first
+                try:
+                    df = pd.read_sql_query(data_query, db._engine)
+                except Exception as sql_error:
+                    # SQL failed, fall back to using last query
+                    log_error(sql_error, {"context": "chart_sql_fallback", "sql": data_query[:200]})
+                    query_info = db.get_last_query_info()
+                    if query_info.get("query"):
+                        df = pd.read_sql_query(query_info["query"], db._engine)
+                    else:
+                        return {"type": "error", "message": f"SQL query failed and no previous data available: {str(sql_error)}"}
+            else:
+                # It might be malformed, try to use last query instead
+                query_info = db.get_last_query_info()
+                if query_info.get("query"):
+                    df = pd.read_sql_query(query_info["query"], db._engine)
+                else:
+                    return {"type": "error", "message": f"Invalid data_query. Use 'use_last' to use existing data, or provide valid SQL. Got: {data_query[:100]}"}
+            
+            if df.empty:
+                return {"type": "error", "message": "No data found for histogram"}
+            
+            # Validate column exists
+            if column not in df.columns:
+                return {"type": "error", "message": f"Column '{column}' not found in data"}
+            
+            # Create histogram
+            fig = px.histogram(
+                df,
+                x=column,
+                color=color_column if color_column and color_column in df.columns else None,
+                title=title,
+                nbins=bins
+            )
+            
+            # Improve layout
+            fig.update_layout(
+                bargap=0.1,
+                showlegend=bool(color_column)
+            )
+            
+            execution_time = time.time() - start_time
+            log_visualization("histogram", len(df), True)
+            log_tool_result("create_histogram", "success", True)
+            log_tool_call("create_histogram", title, execution_time)
+            
+            return {
+                "type": "plotly", 
+                "chart": fig.to_json(),  # Convert to JSON for LangGraph compatibility
+                "description": f"Histogram: {title}"
+            }
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            log_tool_result("create_histogram", "error", False, str(e))
+            log_error(e, {"tool": "create_histogram", "title": title})
+            return {"type": "error", "message": f"Error creating histogram: {str(e)}"}
+    
+    @tool
+    def plot_monthly_transaction_trends() -> Dict[str, Any]:
+        """
+        Create a line chart showing monthly inbound vs outbound transaction trends.
+        Use this specifically when user asks for monthly transaction trends, inbound/outbound trends over time.
+        This tool handles the data query and chart creation automatically.
+        """
+        start_time = time.time()
+        log_tool_call("plot_monthly_transaction_trends", "Monthly transaction trends")
+        
+        try:
+            # SQL query for monthly transaction trends using proper PostgreSQL syntax
+            sql_query = """
+            WITH monthly_inbound AS (
+                SELECT 
+                    TO_CHAR(TO_DATE(inbound_date, 'YYYY/MM/DD'), 'YYYY-MM') AS month,
+                    'Inbound' as transaction_type,
+                    SUM(net_quantity_mt) AS total_quantity
+                FROM inbound 
+                WHERE inbound_date IS NOT NULL
+                GROUP BY TO_CHAR(TO_DATE(inbound_date, 'YYYY/MM/DD'), 'YYYY-MM')
+            ),
+            monthly_outbound AS (
+                SELECT 
+                    TO_CHAR(TO_DATE(outbound_date, 'YYYY/MM/DD'), 'YYYY-MM') AS month,
+                    'Outbound' as transaction_type,
+                    SUM(net_quantity_mt) AS total_quantity
+                FROM outbound 
+                WHERE outbound_date IS NOT NULL
+                GROUP BY TO_CHAR(TO_DATE(outbound_date, 'YYYY/MM/DD'), 'YYYY-MM')
+            )
+            SELECT month, transaction_type, total_quantity 
+            FROM monthly_inbound
             UNION ALL
-            SELECT 
-                outbound_date as transaction_date,
-                'OUTBOUND' as transaction_type,
-                net_quantity_mt as net_quantity_mt
-            FROM outbound
-        ),
-        monthly_data AS (
-            SELECT 
-                DATE_TRUNC('month', transaction_date::DATE) as month,
-                transaction_type,
-                SUM(net_quantity_mt) as total_quantity
-            FROM combined_transactions
-            WHERE transaction_date IS NOT NULL
-            GROUP BY DATE_TRUNC('month', transaction_date::DATE), transaction_type
-            ORDER BY month, transaction_type
-        )
-        SELECT 
-            TO_CHAR(month, 'YYYY-MM') as month_str,
-            transaction_type,
-            total_quantity
-        FROM monthly_data;
-        """
-        
-        # Execute query and get results
-        df = pd.read_sql_query(sql_query, db._engine)
-        
-        if df.empty:
-            return {"type": "error", "message": "No transaction data found for time series"}
-        
-        fig = px.line(
-            df, 
-            x='month_str', 
-            y='total_quantity', 
-            color='transaction_type',
-            title='Monthly Transaction Trends',
-            labels={'total_quantity': 'Quantity (MT)', 'month_str': 'Month', 'transaction_type': 'Transaction Type'}
-        )
-        
-        fig.update_layout(xaxis_tickangle=-45)
-        return {"type": "plotly", "chart": fig, "description": "Monthly transaction trends showing inbound vs outbound volumes"}
-        
-    except Exception as e:
-        return {"type": "error", "message": f"Error creating time series chart: {str(e)}"}
-
-
-def create_ranking_chart(db, query: str) -> Dict[str, Any]:
-    """Create ranking/top N visualizations"""
-    try:
-        if 'material' in query.lower():
-            # Top materials by volume (lowercase columns)
-            sql_query = """
-            WITH combined_transactions AS (
-                SELECT 
-                    material_name, 
-                    net_quantity_mt 
-                FROM inbound
-                UNION ALL
-                SELECT 
-                    material_name, 
-                    net_quantity_mt 
-                FROM outbound
-            ),
-            material_totals AS (
-                SELECT 
-                    material_name,
-                    SUM(net_quantity_mt) as total_volume
-                FROM combined_transactions
-                WHERE material_name IS NOT NULL AND net_quantity_mt IS NOT NULL
-                GROUP BY material_name
-                ORDER BY total_volume DESC
-                LIMIT 10
-            )
-            SELECT material_name, total_volume FROM material_totals;
+            SELECT month, transaction_type, total_quantity 
+            FROM monthly_outbound
+            ORDER BY month, transaction_type;
             """
             
-            df = pd.read_sql_query(sql_query, db._engine)
-            
-            fig = px.bar(
-                df, 
-                x='total_volume', 
-                y='material_name',
-                orientation='h',
-                title='Top 10 Materials by Total Volume',
-                labels={'total_volume': 'Total Volume (MT)', 'material_name': 'Material'}
-            )
-            
-        elif 'plant' in query.lower():
-            # Top plants by volume (lowercase columns)
-            sql_query = """
-            WITH combined_transactions AS (
-                SELECT 
-                    plant_name, 
-                    net_quantity_mt 
-                FROM inbound
-                UNION ALL
-                SELECT 
-                    plant_name, 
-                    net_quantity_mt 
-                FROM outbound
-            ),
-            plant_totals AS (
-                SELECT 
-                    plant_name,
-                    SUM(net_quantity_mt) as total_volume
-                FROM combined_transactions
-                WHERE plant_name IS NOT NULL AND net_quantity_mt IS NOT NULL
-                GROUP BY plant_name
-                ORDER BY total_volume DESC
-                LIMIT 10
-            )
-            SELECT plant_name, total_volume FROM plant_totals;
-            """
-            
-            df = pd.read_sql_query(sql_query, db._engine)
-            
-            fig = px.bar(
-                df, 
-                x='plant_name', 
-                y='total_volume',
-                title='Top 10 Plants by Total Volume',
-                labels={'total_volume': 'Total Volume (MT)', 'plant_name': 'Plant'}
-            )
-            
-        else:
-            # Default: top materials (lowercase columns)
-            sql_query = """
-            WITH combined_transactions AS (
-                SELECT 
-                    material_name, 
-                    net_quantity_mt 
-                FROM inbound
-                UNION ALL
-                SELECT 
-                    material_name, 
-                    net_quantity_mt 
-                FROM outbound
-            ),
-            material_totals AS (
-                SELECT 
-                    material_name,
-                    SUM(net_quantity_mt) as total_volume
-                FROM combined_transactions
-                WHERE material_name IS NOT NULL AND net_quantity_mt IS NOT NULL
-                GROUP BY material_name
-                ORDER BY total_volume DESC
-                LIMIT 10
-            )
-            SELECT material_name, total_volume FROM material_totals;
-            """
-            
-            df = pd.read_sql_query(sql_query, db._engine)
-            
-            fig = px.bar(df, x='material_name', y='total_volume', title='Top 10 Materials by Volume')
-        
-        if df.empty:
-            return {"type": "error", "message": "No data found for ranking chart"}
-        
-        fig.update_layout(xaxis_tickangle=-45)
-        return {"type": "plotly", "chart": fig, "description": "Ranking chart based on your query"}
-        
-    except Exception as e:
-        return {"type": "error", "message": f"Error creating ranking chart: {str(e)}"}
-
-
-def create_inventory_chart(db, query: str) -> Dict[str, Any]:
-    """Create inventory-related visualizations"""
-    try:
-        # SQL query for inventory levels by plant
-        sql_query = """
-        SELECT 
-            plant_name,
-            SUM(unrestricted_stock) as total_inventory
-        FROM inventory
-        WHERE unrestricted_stock > 0
-        GROUP BY plant_name
-        ORDER BY total_inventory DESC;
-        """
-        
-        df = pd.read_sql_query(sql_query, db._engine)
-        
-        if df.empty:
-            return {"type": "error", "message": "No inventory data found"}
-        
-        fig = px.pie(
-            df, 
-            values='total_inventory', 
-            names='plant_name',
-            title='Inventory Distribution by Plant'
-        )
-        
-        return {"type": "plotly", "chart": fig, "description": "Current inventory distribution across plants"}
-        
-    except Exception as e:
-        return {"type": "error", "message": f"Error creating inventory chart: {str(e)}"}
-
-
-def create_cost_chart(db, query: str) -> Dict[str, Any]:
-    """Create cost-related visualizations"""
-    try:
-        if 'storage' in query.lower():
-            # Storage costs by plant (lowercase columns)
-            sql_query = """
-            SELECT 
-                entity_name as plant_name,
-                cost_amount as storage_cost
-            FROM operation_costs
-            WHERE cost_type = 'inventory_storage'
-            ORDER BY storage_cost DESC;
-            """
-            
+            # Execute query
             df = pd.read_sql_query(sql_query, db._engine)
             
             if df.empty:
-                return {"type": "error", "message": "No storage cost data found"}
+                return {"type": "error", "message": "No transaction data found"}
             
-            fig = px.bar(
-                df, 
-                x='plant_name', 
-                y='storage_cost',
-                title='Storage Costs by Plant',
-                labels={'storage_cost': 'Cost per MT per Day', 'plant_name': 'Plant'}
+            # Create line chart
+            fig = px.line(
+                df,
+                x='month',
+                y='total_quantity',
+                color='transaction_type',
+                title='Monthly Transaction Trends: Inbound vs Outbound',
+                labels={'total_quantity': 'Quantity (MT)', 'month': 'Month', 'transaction_type': 'Transaction Type'},
+                markers=True
             )
             
-        elif 'transfer' in query.lower():
-            # Transfer costs by transport mode (lowercase columns)
-            sql_query = """
-            SELECT 
-                entity_name as transport_mode,
-                cost_amount as transfer_cost
-            FROM operation_costs
-            WHERE cost_type = 'truck_transfer'
-            ORDER BY transfer_cost DESC;
-            """
-            
-            df = pd.read_sql_query(sql_query, db._engine)
-            
-            if df.empty:
-                return {"type": "error", "message": "No transfer cost data found"}
-            
-            fig = px.bar(
-                df, 
-                x='transport_mode', 
-                y='transfer_cost',
-                title='Transfer Costs by Transport Mode',
-                labels={'transfer_cost': 'Cost per Container', 'transport_mode': 'Transport Mode'}
+            fig.update_layout(
+                xaxis_tickangle=-45,
+                showlegend=True
             )
             
-        else:
-            # Default storage costs (lowercase columns)
-            sql_query = """
-            SELECT 
-                entity_name as plant_name,
-                cost_amount as storage_cost
-            FROM operation_costs
-            WHERE cost_type = 'inventory_storage'
-            ORDER BY storage_cost DESC;
-            """
+            execution_time = time.time() - start_time
+            log_visualization("monthly_trends", len(df), True)
+            log_tool_result("plot_monthly_transaction_trends", "success", True)
+            log_tool_call("plot_monthly_transaction_trends", "Monthly transaction trends", execution_time)
             
-            df = pd.read_sql_query(sql_query, db._engine)
+            return {
+                "type": "plotly",
+                "chart": fig.to_json(),
+                "description": "Monthly transaction trends showing inbound vs outbound volumes over time"
+            }
             
-            if df.empty:
-                return {"type": "error", "message": "No cost data found"}
-            
-            fig = px.bar(df, x='plant_name', y='storage_cost', title='Storage Costs by Plant')
-        
-        fig.update_layout(xaxis_tickangle=-45)
-        return {"type": "plotly", "chart": fig, "description": "Cost analysis visualization"}
-        
-    except Exception as e:
-        return {"type": "error", "message": f"Error creating cost chart: {str(e)}"}
-
-
-def create_general_chart(db, query: str) -> Dict[str, Any]:
-    """Create general visualizations"""
-    try:
-        # Default: transaction type distribution
-        sql_query = """
-        WITH transaction_counts AS (
-            SELECT 'INBOUND' as transaction_type, COUNT(*) as count FROM inbound
-            UNION ALL
-            SELECT 'OUTBOUND' as transaction_type, COUNT(*) as count FROM outbound
-        )
-        SELECT transaction_type, count FROM transaction_counts;
-        """
-        
-        df = pd.read_sql_query(sql_query, db._engine)
-        
-        if df.empty:
-            return {"type": "error", "message": "No transaction data found"}
-        
-        fig = px.pie(
-            df, 
-            values='count', 
-            names='transaction_type',
-            title='Transaction Type Distribution'
-        )
-        
-        return {"type": "plotly", "chart": fig, "description": "General overview of transaction types"}
-        
-    except Exception as e:
-        return {"type": "error", "message": f"Error creating general chart: {str(e)}"}
+        except Exception as e:
+            execution_time = time.time() - start_time
+            log_tool_result("plot_monthly_transaction_trends", "error", False, str(e))
+            log_error(e, {"tool": "plot_monthly_transaction_trends"})
+            return {"type": "error", "message": f"Error creating monthly trends chart: {str(e)}"}
+    
+    return (
+        analyze_supply_chain_data,
+        execute_sql_for_chart, 
+        create_bar_chart,
+        create_line_chart,
+        create_scatter_plot,
+        create_histogram,
+        plot_monthly_transaction_trends
+    )
