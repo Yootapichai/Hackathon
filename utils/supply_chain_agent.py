@@ -6,7 +6,7 @@ This module contains the main SupplyChainAgent class with separated concerns:
 - Tool definitions moved to tools.py
 - Cleaner, more maintainable code structure
 """
-
+from langchain.tools import tool
 import os
 import time
 from typing import Dict, Any, List
@@ -27,7 +27,7 @@ from .tools import create_supply_chain_tools
 from .logger import (
     log_query, log_agent_response, log_error
 )
-from logguru import logger
+from loguru import logger
 
 load_dotenv()
 
@@ -147,6 +147,8 @@ class SupplyChainAgent:
                 del self.chart_memory[oldest_id]
             
             log_agent_response(f"stored_chart_data_{chart_type}", len(dataframe) if dataframe is not None else 0, 0)
+        except Exception as e:
+            log_error(e, {"context": "store_chart_data", "chart_type": chart_type})
             return chart_id
     def _create_database_connection(self):
         """Create connection to Supabase PostgreSQL database"""
