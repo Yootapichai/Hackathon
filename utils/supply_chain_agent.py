@@ -6,23 +6,28 @@ This module contains the main SupplyChainAgent class with separated concerns:
 - Tool definitions moved to tools.py
 - Cleaner, more maintainable code structure
 """
-from langchain.tools import tool
 import os
 import time
-from typing import Dict, Any, List
+import sqlite3
+import pandas as pd
+import plotly.express as px
+from typing import Dict, Any, List, TypedDict, Annotated
+
+from langchain.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.memory import ConversationBufferWindowMemory
+from langchain_community.agent_toolkits.sql.base import create_sql_agent
+from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from typing import TypedDict, Annotated
 from dotenv import load_dotenv
 
 # Import custom modules
-from .database import create_database_connection
+from .database import QueryCapturingSQLDatabase, create_database_connection
 from .tools import create_supply_chain_tools
 from .logger import (
     log_query, log_agent_response, log_error
@@ -481,8 +486,8 @@ Your answer must end with smile emoji
             return {"type": "plotly", "chart": fig, "description": "Ranking chart based on your query"}
             
         except Exception as e:
-            log_error(e, {"context": "store_chart_data", "chart_type": chart_type})
-            return None
+            log_error(e, {"context": "_create_ranking_chart", "query": query})
+            return {"type": "error", "message": f"Error creating ranking chart: {str(e)}"}
     
     def get_latest_chart_data(self):
         """Get the most recently stored chart data"""
