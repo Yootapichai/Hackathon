@@ -1,0 +1,178 @@
+import pandas as pd
+import json
+from datetime import datetime
+import openpyxl
+
+def read_forecast_excel(file_path):
+    """
+    Read the forecast Excel file and convert it to LLM-friendly format
+    """
+    # Read the Excel file
+    df = pd.read_excel(file_path, header=None)
+    
+    # Extract date headers (row 3, columns 2 onwards)
+    date_columns = []
+    for col in range(2, len(df.columns)):
+        if pd.notna(df.iloc[2, col]):
+            # Convert to readable date format
+            date_val = pd.to_datetime(df.iloc[2, col])
+            date_columns.append(date_val.strftime('%Y-%m'))
+    
+    # Structure to hold the parsed data
+    warehouses = {}
+    
+    # Parse Singapore data (starts at row 1)
+    singapore_data = {
+        'warehouse': 'SINGAPORE',
+        'capacity': [],
+        'predicted_outbound': [],
+        'predicted_inventory': [],
+        'dates': date_columns
+    }
+    
+    # Extract Singapore capacity (row 2, columns 2 onwards)
+    for col in range(2, 2 + len(date_columns)):
+        if col < len(df.columns) and pd.notna(df.iloc[1, col]):
+            singapore_data['capacity'].append(float(df.iloc[1, col]))
+        else:
+            singapore_data['capacity'].append(None)
+    
+    # Extract Singapore outbound (row 6, columns 2 onwards)
+    for col in range(2, 2 + len(date_columns)):
+        if col < len(df.columns) and pd.notna(df.iloc[5, col]):
+            singapore_data['predicted_outbound'].append(float(df.iloc[5, col]))
+        else:
+            singapore_data['predicted_outbound'].append(None)
+    
+    # Extract Singapore inventory (row 7, columns 2 onwards)
+    for col in range(2, 2 + len(date_columns)):
+        if col < len(df.columns) and pd.notna(df.iloc[6, col]):
+            singapore_data['predicted_inventory'].append(float(df.iloc[6, col]))
+        else:
+            singapore_data['predicted_inventory'].append(None)
+    
+    warehouses['SINGAPORE'] = singapore_data
+    
+    # Parse China data (starts at row 13)
+    china_data = {
+        'warehouse': 'CHINA',
+        'capacity': [],
+        'predicted_outbound': [],
+        'predicted_inventory': [],
+        'dates': date_columns
+    }
+    
+    # Extract China capacity (row 14, columns 2 onwards)
+    for col in range(2, 2 + len(date_columns)):
+        if col < len(df.columns) and pd.notna(df.iloc[13, col]):
+            china_data['capacity'].append(float(df.iloc[13, col]))
+        else:
+            china_data['capacity'].append(None)
+    
+    # Extract China outbound (row 18, columns 2 onwards)
+    for col in range(2, 2 + len(date_columns)):
+        if col < len(df.columns) and pd.notna(df.iloc[17, col]):
+            china_data['predicted_outbound'].append(float(df.iloc[17, col]))
+        else:
+            china_data['predicted_outbound'].append(None)
+    
+    # Extract China inventory (row 19, columns 2 onwards)
+    for col in range(2, 2 + len(date_columns)):
+        if col < len(df.columns) and pd.notna(df.iloc[18, col]):
+            china_data['predicted_inventory'].append(float(df.iloc[18, col]))
+        else:
+            china_data['predicted_inventory'].append(None)
+    
+    warehouses['CHINA'] = china_data
+    
+    return warehouses
+
+def format_for_llm(warehouses_data):
+    """
+    Format the data in multiple LLM-friendly formats
+    """
+    
+    # Format 1: Structured JSON
+    print("=== JSON FORMAT ===")
+    print(json.dumps(warehouses_data, indent=2))
+    
+    # Format 2: Tabular CSV-like format
+    print("\n=== TABULAR FORMAT ===")
+    for warehouse_name, data in warehouses_data.items():
+        print(f"\n{warehouse_name} WAREHOUSE:")
+        print("Date,Capacity_KT,Predicted_Outbound_KT,Predicted_Inventory_KT")
+        
+        for i, date in enumerate(data['dates']):
+            capacity = data['capacity'][i] if i < len(data['capacity']) else 'N/A'
+            outbound = data['predicted_outbound'][i] if i < len(data['predicted_outbound']) else 'N/A'
+            inventory = data['predicted_inventory'][i] if i < len(data['predicted_inventory']) else 'N/A'
+            print(f"{date},{capacity},{outbound},{inventory}")
+    
+    # Format 3: Summary statistics
+    print("\n=== SUMMARY STATISTICS ===")
+    for warehouse_name, data in warehouses_data.items():
+        print(f"\n{warehouse_name} WAREHOUSE SUMMARY:")
+        
+        # Capacity stats
+        capacity_values = [x for x in data['capacity'] if x is not None]
+        if capacity_values:
+            print(f"  Capacity: Min={min(capacity_values):.1f} KT, Max={max(capacity_values):.1f} KT, Avg={sum(capacity_values)/len(capacity_values):.1f} KT")
+        
+        # Outbound stats
+        outbound_values = [x for x in data['predicted_outbound'] if x is not None]
+        if outbound_values:
+            print(f"  Outbound: Min={min(outbound_values):.1f} KT, Max={max(outbound_values):.1f} KT, Avg={sum(outbound_values)/len(outbound_values):.1f} KT")
+            print(f"  Total Annual Outbound: {sum(outbound_values):.1f} KT")
+        
+        # Inventory stats
+        inventory_values = [x for x in data['predicted_inventory'] if x is not None]
+        if inventory_values:
+            print(f"  Inventory: Min={min(inventory_values):.1f} KT, Max={max(inventory_values):.1f} KT, Avg={sum(inventory_values)/len(inventory_values):.1f} KT")
+
+def save_to_csv(warehouses_data, output_file='forecast_data.csv'):
+    """
+    Save data to CSV format for easy analysis
+    """
+    all_data = []
+    
+    for warehouse_name, data in warehouses_data.items():
+        for i, date in enumerate(data['dates']):
+            row = {
+                'Warehouse': warehouse_name,
+                'Date': date,
+                'Capacity_KT': data['capacity'][i] if i < len(data['capacity']) else None,
+                'Predicted_Outbound_KT': data['predicted_outbound'][i] if i < len(data['predicted_outbound']) else None,
+                'Predicted_Inventory_KT': data['predicted_inventory'][i] if i < len(data['predicted_inventory']) else None
+            }
+            all_data.append(row)
+    
+    df = pd.DataFrame(all_data)
+    df.to_csv(output_file, index=False)
+    print(f"\nData saved to {output_file}")
+    return df
+
+# Main execution
+if __name__ == "__main__":
+    # Replace 'Forecast.xlsx' with your file path
+    file_path = 'Forecast.xlsx'
+    
+    try:
+        # Read and parse the Excel file
+        warehouses_data = read_forecast_excel(file_path)
+        
+        # Display in LLM-friendly formats
+        format_for_llm(warehouses_data)
+        
+        # Save to CSV for further analysis
+        df = save_to_csv(warehouses_data)
+        
+        print("\n=== USAGE NOTES ===")
+        print("1. The JSON format is perfect for LLM processing")
+        print("2. The tabular format is easy to read and analyze")
+        print("3. The CSV file can be imported into any analysis tool")
+        print("4. All values are in KT (Kilotons)")
+        print("5. Date format is YYYY-MM for easy sorting")
+        
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        print("Make sure the file path is correct and the file format matches the expected structure.")
