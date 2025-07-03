@@ -27,6 +27,7 @@ from .tools import create_supply_chain_tools
 from .logger import (
     log_query, log_agent_response, log_error
 )
+from logguru import logger
 
 load_dotenv()
 
@@ -48,13 +49,13 @@ class SupplyChainAgent:
     
     def __init__(self):
         try:
-            log_agent_response("agent_init", 0, 0)
+            logger.info("Agent initialization started")
             
             # Validate API key
             self.google_api_key = os.environ.get('GOOGLE_API_KEY')
             if not self.google_api_key:
                 error_msg = "GOOGLE_API_KEY environment variable is required"
-                log_error(ValueError(error_msg), {"component": "agent_init"})
+                logger.error(f"Agent initialization failed: {error_msg}")
                 raise ValueError(error_msg)
             
             # Initialize LLM
@@ -68,7 +69,16 @@ class SupplyChainAgent:
             # Initialize database connection
             self.db = create_database_connection()
             
-            # Initialize LangChain memory for conversation context
+            # Log database connection info
+            try:
+                table_names = self.db.get_usable_table_names()
+                logger.info(f"SQL connection initialized with {len(table_names)} tables")
+                for table in table_names:
+                    logger.debug(f"SQL table available: {table}")
+            except Exception as e:
+                logger.error(f"Database logging error: {e}")
+            
+            # Initialize LangChain memory for pandas agent
             self.memory = ConversationBufferWindowMemory(
                 k=5,  # Keep last 5 conversation exchanges
                 memory_key="chat_history",
@@ -80,10 +90,10 @@ class SupplyChainAgent:
                 import sqlite3
                 conn = sqlite3.connect("conversations.db", check_same_thread=False)
                 self.langgraph_memory = SqliteSaver(conn)
-                log_agent_response("sqlite_memory_initialized", 0, 0)
+                logger.info("SQLite memory initialized")
             except Exception as e:
                 # Fallback to in-memory storage
-                log_error(e, {"fallback": "using in-memory storage"})
+                logger.error(f"SQLite memory initialization failed, using in-memory storage: {e}")
                 self.langgraph_memory = MemorySaver()
             
             # Initialize chart data memory for follow-up questions
@@ -94,10 +104,10 @@ class SupplyChainAgent:
             self._setup_tools()
             self._setup_agent()
             
-            log_agent_response("agent_init_complete", 0, 0)
+            logger.info("Agent initialization complete")
             
         except Exception as e:
-            log_error(e, {"component": "agent_init"})
+            logger.error(f"Agent initialization failed: {e}")
             raise
     
     def store_chart_data(self, chart_type: str, dataframe, sql_query: str, description: str = ""):
@@ -138,6 +148,335 @@ class SupplyChainAgent:
             
             log_agent_response(f"stored_chart_data_{chart_type}", len(dataframe) if dataframe is not None else 0, 0)
             return chart_id
+    def _create_database_connection(self):
+        """Create connection to Supabase PostgreSQL database"""
+        try:
+            supabase_url = os.environ.get("SUPABASE_URL")
+            supabase_password = os.environ.get("SUPABASE_DB_PASSWORD")
+            
+            if not supabase_url or not supabase_password:
+                raise ValueError("SUPABASE_URL and SUPABASE_DB_PASSWORD environment variables are required")
+            
+            # Extract project ID from Supabase URL
+            project_id = supabase_url.split("//")[1].split(".")[0]
+            
+            # PostgreSQL connection string for Supabase
+            db_uri = f"postgresql://postgres:{supabase_password}@db.{project_id}.supabase.co:5432/postgres"
+            
+            return QueryCapturingSQLDatabase.from_uri(db_uri)
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            raise
+    
+    def _setup_tools(self):
+        @tool
+        def analyze_supply_chain_data(query: str) -> Dict[str, Any]:
+            """Analyze supply chain data using SQL queries. Returns SQL, DataFrame, and natural language answer."""
+            
+            start_time = time.time()
+            logger.info(f"Starting supply chain data analysis: {query[:100]}...")
+            
+            try:
+                # Clear previous query cache
+                self.db.clear_query_cache()
+                
+                # Enhanced system prompt for SQL agent with business context
+                system_prefix = """
+You are an expert supply chain data analyst with access to a PostgreSQL database containing:
+
+Tables:
+- material_master: Material information (material_name, polymer_type, shelf_life_in_month, downgrade_value_lost_percent)
+- inventory: Current stock levels (balance_as_of_date, plant_name, material_name, batch_number, unrestricted_stock, stock_unit, stock_sell_value, currency)
+- inbound: Incoming shipments (inbound_date, plant_name, material_name, net_quantity_mt)
+- outbound: Outgoing shipments (outbound_date, plant_name, material_name, customer_number, mode_of_transport, net_quantity_mt)
+- operation_costs: Storage and transfer costs (operation_category, cost_type, entity_name, entity_type, cost_amount, cost_unit, container_capacity_mt, currency)
+
+Key Business Rules:
+- Stock quantities are in KG for inventory, MT for inbound/outbound
+- Different plants use different currencies (CNY for China, SGD for Singapore)
+- Batch numbers track specific material lots
+- Materials have shelf life and degradation rates
+
+Always provide actionable insights and consider business context in your analysis.
+Your answer must end with smile emoji
+"""
+                
+                # Create SQL toolkit
+                toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
+                
+                # Create SQL agent with proper memory integration
+                try:
+                    agent = create_sql_agent(
+                        llm=self.llm,
+                        toolkit=toolkit,
+                        verbose=True,
+                        agent_type="openai-tools",  # Changed from zero-shot-react-description
+                        prefix=system_prefix,  # Use prefix parameter for openai-tools agent
+                        handle_parsing_errors=True,
+                        memory=self.memory  # Use proper LangChain memory
+                    )
+                except Exception as e:
+                    logger.error(f"SQL agent creation with memory failed, trying without memory: {e}")
+                    # Fallback without memory if it causes issues
+                    agent = create_sql_agent(
+                        llm=self.llm,
+                        toolkit=toolkit,
+                        verbose=True,
+                        agent_type="openai-tools",  # Changed from zero-shot-react-description
+                        prefix=system_prefix,  # Use prefix parameter for openai-tools agent
+                        handle_parsing_errors=True
+                    )
+                
+                # Use memory-aware invocation
+                result = agent.invoke({"input": query})["output"]
+                
+                # Get the captured SQL query and create DataFrame
+                query_info = self.db.get_last_query_info()
+                sql_query = query_info.get("query", "No SQL query captured")
+                
+                # Create DataFrame from the executed query if available
+                dataframe = None
+                if sql_query and sql_query != "No SQL query captured":
+                    try:
+                        # Execute the same query to get DataFrame
+                        dataframe = pd.read_sql_query(sql_query, self.db._engine)
+                        logger.debug(f"SQL query result captured with shape: {dataframe.shape}")
+                    except Exception as df_error:
+                        logger.error(f"DataFrame creation failed for SQL: {sql_query[:100]}... Error: {df_error}")
+                        # If DataFrame creation fails, still return the text result
+                        pass
+                
+                execution_time = time.time() - start_time
+                logger.info(f"Supply chain data analysis completed successfully in {execution_time:.2f}s")
+                
+                # Return structured response
+                return {
+                    "type": "text_with_sql_and_dataframe",
+                    "text": result,
+                    "sql_query": sql_query,
+                    "dataframe": dataframe
+                }
+                
+            except Exception as e:
+                execution_time = time.time() - start_time
+                logger.error(f"Supply chain data analysis failed in {execution_time:.2f}s: {e}")
+                
+                # Return error as text-only response
+                return {
+                    "type": "text",
+                    "content": f"Error analyzing data: {str(e)}"
+                }
+        
+        @tool 
+        def create_visualization(query: str) -> Dict[str, Any]:
+            """Create Plotly visualizations for supply chain data. Use this when users ask for charts, plots, or visual analysis."""
+            
+            start_time = time.time()
+            logger.info(f"Starting visualization creation: {query[:100]}...")
+            
+            try:
+                # Determine what type of visualization is needed
+                query_lower = query.lower()
+                
+                if any(word in query_lower for word in ['trend', 'time', 'monthly', 'daily', 'over time']):
+                    result = self._create_time_series_chart(query)
+                elif any(word in query_lower for word in ['top', 'highest', 'largest', 'ranking']):
+                    result = self._create_ranking_chart(query)
+                elif any(word in query_lower for word in ['inventory', 'stock', 'levels']):
+                    result = self._create_inventory_chart(query)
+                elif any(word in query_lower for word in ['cost', 'expense', 'storage', 'transfer']):
+                    result = self._create_cost_chart(query)
+                else:
+                    result = self._create_general_chart(query)
+                
+                execution_time = time.time() - start_time
+                
+                if result["type"] == "plotly":
+                    logger.info(f"Visualization created successfully: {result.get('description', 'unknown')}")
+                else:
+                    logger.error(f"Visualization creation failed: {result.get('message')}")
+                
+                logger.info(f"Visualization creation completed in {execution_time:.2f}s")
+                return result
+                
+            except Exception as e:
+                execution_time = time.time() - start_time
+                logger.error(f"Visualization creation failed in {execution_time:.2f}s: {e}")
+                return {"type": "error", "message": f"Error creating visualization: {str(e)}"}
+        
+        self.analyze_tool = analyze_supply_chain_data
+        self.visualize_tool = create_visualization
+    
+    def _create_time_series_chart(self, query: str) -> Dict[str, Any]:
+        """Create time-series visualizations"""
+        try:
+            # SQL query for monthly transaction trends (lowercase columns)
+            sql_query = """
+            WITH combined_transactions AS (
+                SELECT 
+                    inbound_date as transaction_date,
+                    'INBOUND' as transaction_type,
+                    net_quantity_mt as net_quantity_mt
+                FROM inbound
+                UNION ALL
+                SELECT 
+                    outbound_date as transaction_date,
+                    'OUTBOUND' as transaction_type,
+                    net_quantity_mt as net_quantity_mt
+                FROM outbound
+            ),
+            monthly_data AS (
+                SELECT 
+                    DATE_TRUNC('month', transaction_date::DATE) as month,
+                    transaction_type,
+                    SUM(net_quantity_mt) as total_quantity
+                FROM combined_transactions
+                WHERE transaction_date IS NOT NULL
+                GROUP BY DATE_TRUNC('month', transaction_date::DATE), transaction_type
+                ORDER BY month, transaction_type
+            )
+            SELECT 
+                TO_CHAR(month, 'YYYY-MM') as month_str,
+                transaction_type,
+                total_quantity
+            FROM monthly_data;
+            """
+            
+            # Execute query and get results
+            df = pd.read_sql_query(sql_query, self.db._engine)
+            
+            if df.empty:
+                return {"type": "error", "message": "No transaction data found for time series"}
+            
+            fig = px.line(
+                df, 
+                x='month_str', 
+                y='total_quantity', 
+                color='transaction_type',
+                title='Monthly Transaction Trends',
+                labels={'total_quantity': 'Quantity (MT)', 'month_str': 'Month', 'transaction_type': 'Transaction Type'}
+            )
+            
+            fig.update_layout(xaxis_tickangle=-45)
+            return {"type": "plotly", "chart": fig, "description": "Monthly transaction trends showing inbound vs outbound volumes"}
+            
+        except Exception as e:
+            return {"type": "error", "message": f"Error creating time series chart: {str(e)}"}
+    
+    def _create_ranking_chart(self, query: str) -> Dict[str, Any]:
+        """Create ranking/top N visualizations"""
+        try:
+            if 'material' in query.lower():
+                # Top materials by volume (lowercase columns)
+                sql_query = """
+                WITH combined_transactions AS (
+                    SELECT 
+                        material_name, 
+                        net_quantity_mt 
+                    FROM inbound
+                    UNION ALL
+                    SELECT 
+                        material_name, 
+                        net_quantity_mt 
+                    FROM outbound
+                ),
+                material_totals AS (
+                    SELECT 
+                        material_name,
+                        SUM(net_quantity_mt) as total_volume
+                    FROM combined_transactions
+                    WHERE material_name IS NOT NULL AND net_quantity_mt IS NOT NULL
+                    GROUP BY material_name
+                    ORDER BY total_volume DESC
+                    LIMIT 10
+                )
+                SELECT material_name, total_volume FROM material_totals;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                fig = px.bar(
+                    df, 
+                    x='total_volume', 
+                    y='material_name',
+                    orientation='h',
+                    title='Top 10 Materials by Total Volume',
+                    labels={'total_volume': 'Total Volume (MT)', 'material_name': 'Material'}
+                )
+                
+            elif 'plant' in query.lower():
+                # Top plants by volume (lowercase columns)
+                sql_query = """
+                WITH combined_transactions AS (
+                    SELECT 
+                        plant_name, 
+                        net_quantity_mt 
+                    FROM inbound
+                    UNION ALL
+                    SELECT 
+                        plant_name, 
+                        net_quantity_mt 
+                    FROM outbound
+                ),
+                plant_totals AS (
+                    SELECT 
+                        plant_name,
+                        SUM(net_quantity_mt) as total_volume
+                    FROM combined_transactions
+                    WHERE plant_name IS NOT NULL AND net_quantity_mt IS NOT NULL
+                    GROUP BY plant_name
+                    ORDER BY total_volume DESC
+                    LIMIT 10
+                )
+                SELECT plant_name, total_volume FROM plant_totals;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                fig = px.bar(
+                    df, 
+                    x='plant_name', 
+                    y='total_volume',
+                    title='Top 10 Plants by Total Volume',
+                    labels={'total_volume': 'Total Volume (MT)', 'plant_name': 'Plant'}
+                )
+                
+            else:
+                # Default: top materials (lowercase columns)
+                sql_query = """
+                WITH combined_transactions AS (
+                    SELECT 
+                        material_name, 
+                        net_quantity_mt 
+                    FROM inbound
+                    UNION ALL
+                    SELECT 
+                        material_name, 
+                        net_quantity_mt 
+                    FROM outbound
+                ),
+                material_totals AS (
+                    SELECT 
+                        material_name,
+                        SUM(net_quantity_mt) as total_volume
+                    FROM combined_transactions
+                    WHERE material_name IS NOT NULL AND net_quantity_mt IS NOT NULL
+                    GROUP BY material_name
+                    ORDER BY total_volume DESC
+                    LIMIT 10
+                )
+                SELECT material_name, total_volume FROM material_totals;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                fig = px.bar(df, x='material_name', y='total_volume', title='Top 10 Materials by Volume')
+            
+            if df.empty:
+                return {"type": "error", "message": "No data found for ranking chart"}
+            
+            fig.update_layout(xaxis_tickangle=-45)
+            return {"type": "plotly", "chart": fig, "description": "Ranking chart based on your query"}
             
         except Exception as e:
             log_error(e, {"context": "store_chart_data", "chart_type": chart_type})
@@ -226,7 +565,7 @@ class SupplyChainAgent:
             Dict with response type, content, and optional chart/SQL data
         """
         start_time = time.time()
-        log_query(query)
+        logger.info(f"Processing query: {query[:100]}...")
         
         try:
             # Clear any previous query cache to avoid stale data
@@ -403,8 +742,7 @@ class SupplyChainAgent:
         except Exception as e:
             processing_time = time.time() - start_time
             error_msg = f"Error processing query: {str(e)}"
-            log_error(e, {"query": query, "processing_time": processing_time})
-            log_agent_response("error", len(error_msg), processing_time)
+            logger.error(f"Query processing failed in {processing_time:.2f}s: {e}")
             return {"type": "error", "content": error_msg}
     
     def get_conversation_history(self, thread_id: str = "default") -> List[BaseMessage]:
@@ -414,7 +752,7 @@ class SupplyChainAgent:
             state = self.app.get_state(config)
             return state.values.get("messages", [])
         except Exception as e:
-            log_error(e, {"method": "get_conversation_history", "thread_id": thread_id})
+            logger.error(f"Failed to get conversation history for thread {thread_id}: {e}")
             return []
     
     def clear_memory(self, thread_id: str = "default"):
@@ -425,7 +763,7 @@ class SupplyChainAgent:
             
             # Clear LangGraph state (note: MemorySaver doesn't have direct clear method)
             # Memory will naturally expire or can be handled at the application level
-            log_agent_response("memory_cleared", 0, 0)
+            logger.info("Memory cleared successfully")
             
         except Exception as e:
-            log_error(e, {"method": "clear_memory", "thread_id": thread_id})
+            logger.error(f"Failed to clear memory for thread {thread_id}: {e}")
