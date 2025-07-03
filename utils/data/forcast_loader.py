@@ -3,6 +3,41 @@ import json
 from datetime import datetime
 import openpyxl
 
+def parse_warehouse_data(df, warehouse_name, capacity_row, outbound_row, inventory_row, date_columns):
+    """
+    Helper function to parse warehouse data.
+    """
+    warehouse_data = {
+        'warehouse': warehouse_name,
+        'capacity': [],
+        'predicted_outbound': [],
+        'predicted_inventory': [],
+        'dates': date_columns
+    }
+    
+    # Extract capacity
+    for col in range(2, 2 + len(date_columns)):
+        if col < len(df.columns) and pd.notna(df.iloc[capacity_row, col]):
+            warehouse_data['capacity'].append(float(df.iloc[capacity_row, col]))
+        else:
+            warehouse_data['capacity'].append(None)
+    
+    # Extract predicted outbound
+    for col in range(2, 2 + len(date_columns)):
+        if col < len(df.columns) and pd.notna(df.iloc[outbound_row, col]):
+            warehouse_data['predicted_outbound'].append(float(df.iloc[outbound_row, col]))
+        else:
+            warehouse_data['predicted_outbound'].append(None)
+    
+    # Extract predicted inventory
+    for col in range(2, 2 + len(date_columns)):
+        if col < len(df.columns) and pd.notna(df.iloc[inventory_row, col]):
+            warehouse_data['predicted_inventory'].append(float(df.iloc[inventory_row, col]))
+        else:
+            warehouse_data['predicted_inventory'].append(None)
+    
+    return warehouse_data
+
 def read_forecast_excel(file_path):
     """
     Read the forecast Excel file and convert it to LLM-friendly format
@@ -21,71 +56,11 @@ def read_forecast_excel(file_path):
     # Structure to hold the parsed data
     warehouses = {}
     
-    # Parse Singapore data (starts at row 1)
-    singapore_data = {
-        'warehouse': 'SINGAPORE',
-        'capacity': [],
-        'predicted_outbound': [],
-        'predicted_inventory': [],
-        'dates': date_columns
-    }
+    # Parse Singapore data
+    warehouses['SINGAPORE'] = parse_warehouse_data(df, 'SINGAPORE', 1, 5, 6, date_columns)
     
-    # Extract Singapore capacity (row 2, columns 2 onwards)
-    for col in range(2, 2 + len(date_columns)):
-        if col < len(df.columns) and pd.notna(df.iloc[1, col]):
-            singapore_data['capacity'].append(float(df.iloc[1, col]))
-        else:
-            singapore_data['capacity'].append(None)
-    
-    # Extract Singapore outbound (row 6, columns 2 onwards)
-    for col in range(2, 2 + len(date_columns)):
-        if col < len(df.columns) and pd.notna(df.iloc[5, col]):
-            singapore_data['predicted_outbound'].append(float(df.iloc[5, col]))
-        else:
-            singapore_data['predicted_outbound'].append(None)
-    
-    # Extract Singapore inventory (row 7, columns 2 onwards)
-    for col in range(2, 2 + len(date_columns)):
-        if col < len(df.columns) and pd.notna(df.iloc[6, col]):
-            singapore_data['predicted_inventory'].append(float(df.iloc[6, col]))
-        else:
-            singapore_data['predicted_inventory'].append(None)
-    
-    warehouses['SINGAPORE'] = singapore_data
-    
-    # Parse China data (starts at row 13)
-    china_data = {
-        'warehouse': 'CHINA',
-        'capacity': [],
-        'predicted_outbound': [],
-        'predicted_inventory': [],
-        'dates': date_columns
-    }
-    
-    # Extract China capacity (row 14, columns 2 onwards)
-    for col in range(2, 2 + len(date_columns)):
-        if col < len(df.columns) and pd.notna(df.iloc[13, col]):
-            china_data['capacity'].append(float(df.iloc[13, col]))
-        else:
-            china_data['capacity'].append(None)
-    
-    # Extract China outbound (row 18, columns 2 onwards)
-    for col in range(2, 2 + len(date_columns)):
-        if col < len(df.columns) and pd.notna(df.iloc[17, col]):
-            china_data['predicted_outbound'].append(float(df.iloc[17, col]))
-        else:
-            china_data['predicted_outbound'].append(None)
-    
-    # Extract China inventory (row 19, columns 2 onwards)
-    for col in range(2, 2 + len(date_columns)):
-        if col < len(df.columns) and pd.notna(df.iloc[18, col]):
-            china_data['predicted_inventory'].append(float(df.iloc[18, col]))
-        else:
-            china_data['predicted_inventory'].append(None)
-    
-    warehouses['CHINA'] = china_data
-    
-    return warehouses
+    # Parse China data
+    warehouses['CHINA'] = parse_warehouse_data(df, 'CHINA', 13, 17, 18, date_columns)
 
 def format_for_llm(warehouses_data):
     """
