@@ -15,7 +15,7 @@ from langchain.tools import tool
 from .logger import log_tool_call, log_tool_result, log_error, log_dataframe_operation, log_visualization
 
 
-def create_supply_chain_tools(db, llm, memory):
+def create_supply_chain_tools(db, llm, memory, agent=None):
     """
     Factory function to create supply chain analysis tools with database and LLM dependencies.
     
@@ -23,9 +23,10 @@ def create_supply_chain_tools(db, llm, memory):
         db: QueryCapturingSQLDatabase instance
         llm: Language model instance
         memory: ConversationBufferWindowMemory instance
+        agent: SupplyChainAgent instance for chart memory access
     
     Returns:
-        tuple: (analyze_tool, sql_tool, bar_tool, line_tool, scatter_tool, histogram_tool)
+        tuple: (analyze_tool, sql_tool, bar_tool, line_tool, scatter_tool, histogram_tool, trends_tool, chart_analysis_tool)
     """
     
     @tool
@@ -69,6 +70,15 @@ IMPORTANT FOR CHARTS: When user requests charts/visualizations:
 1. First use analyze_supply_chain_data to get the data
 2. Then use the appropriate chart tool with data_query='use_last'
 3. Never create SQL queries for chart tools - use existing analyzed data
+
+IMPORTANT FOR FOLLOW-UP QUESTIONS: When user asks follow-up questions about recently generated charts:
+1. Use analyze_existing_chart_data tool for questions like:
+   - "What's the highest value in the chart?"
+   - "Which month had the peak?"
+   - "What's the trend shown?"
+   - "What date shows the maximum value?"
+2. This is more efficient than making new SQL queries
+3. Only use if there's a recently generated chart to analyze
 
 Your answer must end with smile emoji
 """
@@ -296,6 +306,22 @@ Your answer must end with smile emoji
             log_tool_result("create_bar_chart", "success", True)
             log_tool_call("create_bar_chart", title, execution_time)
             
+            # Store chart data in agent memory if agent is available
+            if agent:
+                # Get the SQL query for storage
+                if data_query == "use_last":
+                    query_info = db.get_last_query_info()
+                    storage_sql = query_info.get("query", "use_last")
+                else:
+                    storage_sql = data_query
+                
+                agent.store_chart_data(
+                    chart_type="bar_chart",
+                    dataframe=df,
+                    sql_query=storage_sql,
+                    description=f"Bar chart: {title}"
+                )
+            
             return {
                 "type": "plotly",
                 "chart": fig.to_json(),  # Convert to JSON for LangGraph compatibility
@@ -416,6 +442,22 @@ Your answer must end with smile emoji
             log_tool_result("create_line_chart", "success", True)
             log_tool_call("create_line_chart", title, execution_time)
             
+            # Store chart data in agent memory if agent is available
+            if agent:
+                # Get the SQL query for storage
+                if data_query == "use_last":
+                    query_info = db.get_last_query_info()
+                    storage_sql = query_info.get("query", "use_last")
+                else:
+                    storage_sql = data_query
+                
+                agent.store_chart_data(
+                    chart_type="line_chart",
+                    dataframe=df,
+                    sql_query=storage_sql,
+                    description=f"Line chart: {title}"
+                )
+            
             return {
                 "type": "plotly",
                 "chart": fig.to_json(),  # Convert to JSON for LangGraph compatibility
@@ -522,6 +564,22 @@ Your answer must end with smile emoji
             log_tool_result("create_scatter_plot", "success", True)
             log_tool_call("create_scatter_plot", title, execution_time)
             
+            # Store chart data in agent memory if agent is available
+            if agent:
+                # Get the SQL query for storage
+                if data_query == "use_last":
+                    query_info = db.get_last_query_info()
+                    storage_sql = query_info.get("query", "use_last")
+                else:
+                    storage_sql = data_query
+                
+                agent.store_chart_data(
+                    chart_type="scatter_plot",
+                    dataframe=df,
+                    sql_query=storage_sql,
+                    description=f"Scatter plot: {title}"
+                )
+            
             return {
                 "type": "plotly",
                 "chart": fig.to_json(),  # Convert to JSON for LangGraph compatibility
@@ -624,6 +682,22 @@ Your answer must end with smile emoji
             log_tool_result("create_histogram", "success", True)
             log_tool_call("create_histogram", title, execution_time)
             
+            # Store chart data in agent memory if agent is available
+            if agent:
+                # Get the SQL query for storage
+                if data_query == "use_last":
+                    query_info = db.get_last_query_info()
+                    storage_sql = query_info.get("query", "use_last")
+                else:
+                    storage_sql = data_query
+                
+                agent.store_chart_data(
+                    chart_type="histogram",
+                    dataframe=df,
+                    sql_query=storage_sql,
+                    description=f"Histogram: {title}"
+                )
+            
             return {
                 "type": "plotly", 
                 "chart": fig.to_json(),  # Convert to JSON for LangGraph compatibility
@@ -635,6 +709,157 @@ Your answer must end with smile emoji
             log_tool_result("create_histogram", "error", False, str(e))
             log_error(e, {"tool": "create_histogram", "title": title})
             return {"type": "error", "message": f"Error creating histogram: {str(e)}"}
+    
+    @tool
+    def analyze_existing_chart_data(question: str) -> Dict[str, Any]:
+        """
+        Analyze data from recently generated charts without making new SQL queries.
+        Use this for follow-up questions about charts like:
+        - "What's the highest value in the chart?"
+        - "Which month had the peak inbound?"
+        - "From the chart, what's the trend?"
+        - "What date shows the maximum value?"
+        
+        This tool is efficient for chart follow-ups as it uses existing data.
+        Only use this if there's a recently generated chart to analyze.
+        
+        Args:
+            question: The question about the existing chart data
+        """
+        start_time = time.time()
+        log_tool_call("analyze_existing_chart_data", question)
+        
+        try:
+            # Check if agent is available and has chart data
+            if not agent or not agent.has_recent_chart_data():
+                return {
+                    "type": "error",
+                    "message": "No recent chart data available. Please generate a chart first."
+                }
+            
+            # Get the most recent chart data
+            chart_data = agent.get_latest_chart_data()
+            df = chart_data["dataframe"]
+            chart_type = chart_data["type"]
+            
+            if df is None or df.empty:
+                return {
+                    "type": "error", 
+                    "message": "Chart data is empty or unavailable."
+                }
+            
+            # Analyze the dataframe based on the question
+            analysis_result = ""
+            
+            # Common analysis patterns
+            question_lower = question.lower()
+            
+            if any(word in question_lower for word in ['highest', 'maximum', 'peak', 'max']):
+                # Find maximum values
+                if 'inbound' in question_lower:
+                    # Look for inbound-specific max
+                    if 'transaction_type' in df.columns:
+                        inbound_data = df[df['transaction_type'] == 'Inbound']
+                        if not inbound_data.empty:
+                            max_row = inbound_data.loc[inbound_data['total_quantity'].idxmax()]
+                            analysis_result = f"The highest inbound value is {max_row['total_quantity']:.2f} MT in {max_row['month']}."
+                    elif 'total_inbound_mt' in df.columns:
+                        max_row = df.loc[df['total_inbound_mt'].idxmax()]
+                        analysis_result = f"The highest inbound value is {max_row['total_inbound_mt']:.2f} MT in {max_row['month']}."
+                elif 'outbound' in question_lower:
+                    # Look for outbound-specific max
+                    if 'transaction_type' in df.columns:
+                        outbound_data = df[df['transaction_type'] == 'Outbound']
+                        if not outbound_data.empty:
+                            max_row = outbound_data.loc[outbound_data['total_quantity'].idxmax()]
+                            analysis_result = f"The highest outbound value is {max_row['total_quantity']:.2f} MT in {max_row['month']}."
+                    elif 'total_outbound_mt' in df.columns:
+                        max_row = df.loc[df['total_outbound_mt'].idxmax()]
+                        analysis_result = f"The highest outbound value is {max_row['total_outbound_mt']:.2f} MT in {max_row['month']}."
+                else:
+                    # General maximum - find numeric columns
+                    numeric_cols = df.select_dtypes(include=['number']).columns
+                    if len(numeric_cols) > 0:
+                        main_col = numeric_cols[0]
+                        max_idx = df[main_col].idxmax()
+                        max_row = df.loc[max_idx]
+                        date_col = [col for col in df.columns if 'month' in col.lower() or 'date' in col.lower()]
+                        if date_col:
+                            analysis_result = f"The maximum value is {max_row[main_col]:.2f} in {max_row[date_col[0]]}."
+                        else:
+                            analysis_result = f"The maximum value is {max_row[main_col]:.2f}."
+            
+            elif any(word in question_lower for word in ['lowest', 'minimum', 'min']):
+                # Find minimum values
+                numeric_cols = df.select_dtypes(include=['number']).columns
+                if len(numeric_cols) > 0:
+                    main_col = numeric_cols[0]
+                    min_idx = df[main_col].idxmin()
+                    min_row = df.loc[min_idx]
+                    date_col = [col for col in df.columns if 'month' in col.lower() or 'date' in col.lower()]
+                    if date_col:
+                        analysis_result = f"The minimum value is {min_row[main_col]:.2f} in {min_row[date_col[0]]}."
+                    else:
+                        analysis_result = f"The minimum value is {min_row[main_col]:.2f}."
+            
+            elif any(word in question_lower for word in ['trend', 'pattern', 'direction']):
+                # Analyze trends
+                numeric_cols = df.select_dtypes(include=['number']).columns
+                if len(numeric_cols) > 0:
+                    main_col = numeric_cols[0]
+                    if len(df) > 1:
+                        start_val = df[main_col].iloc[0]
+                        end_val = df[main_col].iloc[-1]
+                        if end_val > start_val:
+                            analysis_result = f"The trend shows an overall increase from {start_val:.2f} to {end_val:.2f}."
+                        elif end_val < start_val:
+                            analysis_result = f"The trend shows an overall decrease from {start_val:.2f} to {end_val:.2f}."
+                        else:
+                            analysis_result = f"The trend is relatively stable around {start_val:.2f}."
+            
+            elif any(word in question_lower for word in ['total', 'sum', 'aggregate']):
+                # Calculate totals
+                numeric_cols = df.select_dtypes(include=['number']).columns
+                if len(numeric_cols) > 0:
+                    totals = []
+                    for col in numeric_cols:
+                        total = df[col].sum()
+                        totals.append(f"{col}: {total:.2f}")
+                    analysis_result = f"Totals: {', '.join(totals)}"
+            
+            else:
+                # General summary
+                analysis_result = f"Chart contains {len(df)} data points"
+                if 'month' in df.columns:
+                    date_range = f" from {df['month'].min()} to {df['month'].max()}"
+                    analysis_result += date_range
+                
+                numeric_cols = df.select_dtypes(include=['number']).columns
+                if len(numeric_cols) > 0:
+                    main_col = numeric_cols[0]
+                    analysis_result += f". Values range from {df[main_col].min():.2f} to {df[main_col].max():.2f}."
+            
+            # If no specific analysis was done, provide general info
+            if not analysis_result:
+                analysis_result = f"Chart data has {len(df)} rows with columns: {', '.join(df.columns)}. Please ask a more specific question about the data."
+            
+            execution_time = time.time() - start_time
+            log_tool_result("analyze_existing_chart_data", "success", True)
+            log_tool_call("analyze_existing_chart_data", question, execution_time)
+            
+            return {
+                "type": "chart_analysis",
+                "analysis": analysis_result,
+                "chart_type": chart_type,
+                "data_points": len(df),
+                "columns": list(df.columns)
+            }
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            log_tool_result("analyze_existing_chart_data", "error", False, str(e))
+            log_error(e, {"tool": "analyze_existing_chart_data", "question": question})
+            return {"type": "error", "message": f"Error analyzing chart data: {str(e)}"}
     
     @tool
     def plot_monthly_transaction_trends() -> Dict[str, Any]:
@@ -702,6 +927,15 @@ Your answer must end with smile emoji
             log_tool_result("plot_monthly_transaction_trends", "success", True)
             log_tool_call("plot_monthly_transaction_trends", "Monthly transaction trends", execution_time)
             
+            # Store chart data in agent memory if agent is available
+            if agent:
+                agent.store_chart_data(
+                    chart_type="monthly_trends",
+                    dataframe=df,
+                    sql_query=sql_query,
+                    description="Monthly transaction trends showing inbound vs outbound volumes over time"
+                )
+            
             return {
                 "type": "plotly",
                 "chart": fig.to_json(),
@@ -721,5 +955,6 @@ Your answer must end with smile emoji
         create_line_chart,
         create_scatter_plot,
         create_histogram,
-        plot_monthly_transaction_trends
+        plot_monthly_transaction_trends,
+        analyze_existing_chart_data
     )

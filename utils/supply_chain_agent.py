@@ -86,6 +86,10 @@ class SupplyChainAgent:
                 log_error(e, {"fallback": "using in-memory storage"})
                 self.langgraph_memory = MemorySaver()
             
+            # Initialize chart data memory for follow-up questions
+            self.chart_memory = {}  # Store recent chart data for follow-ups
+            self.max_stored_charts = 3  # Keep last 3 charts
+            
             # Setup tools and agent
             self._setup_tools()
             self._setup_agent()
@@ -96,6 +100,76 @@ class SupplyChainAgent:
             log_error(e, {"component": "agent_init"})
             raise
     
+    def store_chart_data(self, chart_type: str, dataframe, sql_query: str, description: str = ""):
+        """
+        Store chart data for follow-up questions
+        
+        Args:
+            chart_type: Type of chart (e.g., 'monthly_trends', 'bar_chart')
+            dataframe: The pandas DataFrame used to create the chart
+            sql_query: The SQL query used to generate the data
+            description: Optional description of the chart
+        """
+        try:
+            import time
+            
+            chart_id = f"{chart_type}_{int(time.time())}"
+            
+            chart_data = {
+                "id": chart_id,
+                "type": chart_type,
+                "dataframe": dataframe,
+                "sql_query": sql_query,
+                "description": description,
+                "timestamp": time.time(),
+                "row_count": len(dataframe) if dataframe is not None else 0,
+                "columns": list(dataframe.columns) if dataframe is not None else []
+            }
+            
+            # Store the chart data
+            self.chart_memory[chart_id] = chart_data
+            
+            # Keep only the most recent charts
+            if len(self.chart_memory) > self.max_stored_charts:
+                # Remove oldest chart
+                oldest_id = min(self.chart_memory.keys(), 
+                              key=lambda k: self.chart_memory[k]["timestamp"])
+                del self.chart_memory[oldest_id]
+            
+            log_agent_response(f"stored_chart_data_{chart_type}", len(dataframe) if dataframe is not None else 0, 0)
+            return chart_id
+            
+        except Exception as e:
+            log_error(e, {"context": "store_chart_data", "chart_type": chart_type})
+            return None
+    
+    def get_latest_chart_data(self):
+        """Get the most recently stored chart data"""
+        if not self.chart_memory:
+            return None
+        
+        # Return the most recent chart
+        latest_id = max(self.chart_memory.keys(), 
+                       key=lambda k: self.chart_memory[k]["timestamp"])
+        return self.chart_memory[latest_id]
+    
+    def get_chart_data_by_type(self, chart_type: str):
+        """Get the most recent chart data of a specific type"""
+        matching_charts = [
+            chart for chart in self.chart_memory.values() 
+            if chart["type"] == chart_type
+        ]
+        
+        if not matching_charts:
+            return None
+        
+        # Return the most recent of this type
+        return max(matching_charts, key=lambda c: c["timestamp"])
+    
+    def has_recent_chart_data(self) -> bool:
+        """Check if there's any recent chart data available"""
+        return len(self.chart_memory) > 0
+    
     def _setup_tools(self):
         """Setup tools using the tools module"""
         (
@@ -105,11 +179,13 @@ class SupplyChainAgent:
             self.line_chart_tool,
             self.scatter_plot_tool,
             self.histogram_tool,
-            self.monthly_trends_tool
+            self.monthly_trends_tool,
+            self.analyze_chart_data_tool
         ) = create_supply_chain_tools(
             db=self.db,
             llm=self.llm,
-            memory=self.memory
+            memory=self.memory,
+            agent=self
         )
     
     def _setup_agent(self):
@@ -121,7 +197,8 @@ class SupplyChainAgent:
             self.line_chart_tool,
             self.scatter_plot_tool,
             self.histogram_tool,
-            self.monthly_trends_tool
+            self.monthly_trends_tool,
+            self.analyze_chart_data_tool
         ]
         
         agent_node = create_react_agent(
