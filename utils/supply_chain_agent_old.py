@@ -1,16 +1,18 @@
-"""
-Supply Chain Agent - Refactored Version
-
-This module contains the main SupplyChainAgent class with separated concerns:
-- Database connection logic moved to database.py
-- Tool definitions moved to tools.py
-- Cleaner, more maintainable code structure
-"""
-
 import os
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import time
+import traceback
 from typing import Dict, Any, List
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.agent_toolkits.sql.base import create_sql_agent
+from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
+from langchain_community.utilities import SQLDatabase
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableLambda
+from langchain_core.output_parsers import StrOutputParser
+from langchain.tools import tool
 from langchain.memory import ConversationBufferWindowMemory
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -21,62 +23,85 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from typing import TypedDict, Annotated
 from dotenv import load_dotenv
 
-# Import custom modules
-from .database import create_database_connection
-from .tools import create_supply_chain_tools
+# SQL database connection replaces dataframe imports
 from .logger import (
-    log_query, log_agent_response, log_error
+    log_query, log_tool_call, log_tool_result, log_agent_response, 
+    log_error, log_dataframe_operation, log_visualization
 )
-from logguru import logger
 
 load_dotenv()
 
+class QueryCapturingSQLDatabase(SQLDatabase):
+    """Custom SQLDatabase wrapper that captures executed queries"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_executed_query = None
+        self.last_query_result = None
+    
+    def run(self, command: str, fetch: str = "all", **kwargs) -> str:
+        """Override run method to capture queries"""
+        try:
+            # Store the query being executed
+            self.last_executed_query = command.strip()
+            
+            # Execute the query using parent method with all parameters
+            result = super().run(command, fetch, **kwargs)
+            
+            # Store the result
+            self.last_query_result = result
+            
+            return result
+        except Exception as e:
+            # Reset on error
+            self.last_executed_query = None
+            self.last_query_result = None
+            raise e
+    
+    def get_last_query_info(self):
+        """Get the last executed query and its results"""
+        return {
+            "query": self.last_executed_query,
+            "result": self.last_query_result
+        }
+    
+    def clear_query_cache(self):
+        """Clear stored query information"""
+        self.last_executed_query = None
+        self.last_query_result = None
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
-
 class SupplyChainAgent:
-    """
-    Main Supply Chain Analytics Agent
-    
-    Provides natural language interface to supply chain database with:
-    - SQL-powered data analysis
-    - Interactive visualizations
-    - Conversation memory
-    - Session persistence
-    """
-    
     def __init__(self):
         try:
-            logger.info("Agent initialization started")
+            log_agent_response("agent_init", 0, 0)
             
-            # Validate API key
             self.google_api_key = os.environ.get('GOOGLE_API_KEY')
             if not self.google_api_key:
                 error_msg = "GOOGLE_API_KEY environment variable is required"
-                logger.error(f"Agent initialization failed: {error_msg}")
+                log_error(ValueError(error_msg), {"component": "agent_init"})
                 raise ValueError(error_msg)
             
-            # Initialize LLM
             self.llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model="gemini-2.0-flash",
                 google_api_key=self.google_api_key,
                 temperature=0.0,
                 verbose=True
             )
             
-            # Initialize database connection
-            self.db = create_database_connection()
+            # Initialize SQL database connection
+            self.db = self._create_database_connection()
             
             # Log database connection info
             try:
                 table_names = self.db.get_usable_table_names()
-                logger.info(f"SQL connection initialized with {len(table_names)} tables")
+                log_agent_response("sql_connection_initialized", len(table_names), 0)
                 for table in table_names:
-                    logger.debug(f"SQL table available: {table}")
+                    log_dataframe_operation("sql_table_available", table, (0, 0))
             except Exception as e:
-                logger.error(f"Database logging error: {e}")
+                log_error(e, {"component": "database_logging"})
             
             # Initialize LangChain memory for pandas agent
             self.memory = ConversationBufferWindowMemory(
@@ -87,67 +112,27 @@ class SupplyChainAgent:
             
             # Initialize LangGraph memory saver with SQLite persistence
             try:
+                # Use proper SQLite initialization pattern
                 import sqlite3
                 conn = sqlite3.connect("conversations.db", check_same_thread=False)
                 self.langgraph_memory = SqliteSaver(conn)
-                logger.info("SQLite memory initialized")
+                log_agent_response("sqlite_memory_initialized", 0, 0)
             except Exception as e:
                 # Fallback to in-memory storage
-                logger.error(f"SQLite memory initialization failed, using in-memory storage: {e}")
+                log_error(e, {"fallback": "using in-memory storage"})
                 self.langgraph_memory = MemorySaver()
             
-            # Initialize chart data memory for follow-up questions
-            self.chart_memory = {}  # Store recent chart data for follow-ups
-            self.max_stored_charts = 3  # Keep last 3 charts
+            # Database connection successful
             
-            # Setup tools and agent
             self._setup_tools()
             self._setup_agent()
             
-            logger.info("Agent initialization complete")
+            log_agent_response("agent_init_complete", 0, 0)
             
         except Exception as e:
-            logger.error(f"Agent initialization failed: {e}")
+            log_error(e, {"component": "agent_init"})
             raise
     
-    def store_chart_data(self, chart_type: str, dataframe, sql_query: str, description: str = ""):
-        """
-        Store chart data for follow-up questions
-        
-        Args:
-            chart_type: Type of chart (e.g., 'monthly_trends', 'bar_chart')
-            dataframe: The pandas DataFrame used to create the chart
-            sql_query: The SQL query used to generate the data
-            description: Optional description of the chart
-        """
-        try:
-            import time
-            
-            chart_id = f"{chart_type}_{int(time.time())}"
-            
-            chart_data = {
-                "id": chart_id,
-                "type": chart_type,
-                "dataframe": dataframe,
-                "sql_query": sql_query,
-                "description": description,
-                "timestamp": time.time(),
-                "row_count": len(dataframe) if dataframe is not None else 0,
-                "columns": list(dataframe.columns) if dataframe is not None else []
-            }
-            
-            # Store the chart data
-            self.chart_memory[chart_id] = chart_data
-            
-            # Keep only the most recent charts
-            if len(self.chart_memory) > self.max_stored_charts:
-                # Remove oldest chart
-                oldest_id = min(self.chart_memory.keys(), 
-                              key=lambda k: self.chart_memory[k]["timestamp"])
-                del self.chart_memory[oldest_id]
-            
-            log_agent_response(f"stored_chart_data_{chart_type}", len(dataframe) if dataframe is not None else 0, 0)
-            return chart_id
     def _create_database_connection(self):
         """Create connection to Supabase PostgreSQL database"""
         try:
@@ -165,7 +150,7 @@ class SupplyChainAgent:
             
             return QueryCapturingSQLDatabase.from_uri(db_uri)
         except Exception as e:
-            logger.error(f"Database connection failed: {e}")
+            log_error(e, {"component": "database_connection"})
             raise
     
     def _setup_tools(self):
@@ -174,7 +159,7 @@ class SupplyChainAgent:
             """Analyze supply chain data using SQL queries. Returns SQL, DataFrame, and natural language answer."""
             
             start_time = time.time()
-            logger.info(f"Starting supply chain data analysis: {query[:100]}...")
+            log_tool_call("analyze_supply_chain_data", query)
             
             try:
                 # Clear previous query cache
@@ -216,7 +201,7 @@ Your answer must end with smile emoji
                         memory=self.memory  # Use proper LangChain memory
                     )
                 except Exception as e:
-                    logger.error(f"SQL agent creation with memory failed, trying without memory: {e}")
+                    log_error(e, {"fallback": "trying without memory"})
                     # Fallback without memory if it causes issues
                     agent = create_sql_agent(
                         llm=self.llm,
@@ -240,14 +225,15 @@ Your answer must end with smile emoji
                     try:
                         # Execute the same query to get DataFrame
                         dataframe = pd.read_sql_query(sql_query, self.db._engine)
-                        logger.debug(f"SQL query result captured with shape: {dataframe.shape}")
+                        log_dataframe_operation("sql_query_result", "captured", dataframe.shape)
                     except Exception as df_error:
-                        logger.error(f"DataFrame creation failed for SQL: {sql_query[:100]}... Error: {df_error}")
+                        log_error(df_error, {"context": "dataframe_creation", "sql": sql_query})
                         # If DataFrame creation fails, still return the text result
                         pass
                 
                 execution_time = time.time() - start_time
-                logger.info(f"Supply chain data analysis completed successfully in {execution_time:.2f}s")
+                log_tool_result("analyze_supply_chain_data", "enhanced_sql_response", True)
+                log_tool_call("analyze_supply_chain_data", query, execution_time)
                 
                 # Return structured response
                 return {
@@ -259,7 +245,8 @@ Your answer must end with smile emoji
                 
             except Exception as e:
                 execution_time = time.time() - start_time
-                logger.error(f"Supply chain data analysis failed in {execution_time:.2f}s: {e}")
+                log_tool_result("analyze_supply_chain_data", "error", False, str(e))
+                log_error(e, {"tool": "analyze_supply_chain_data", "query": query})
                 
                 # Return error as text-only response
                 return {
@@ -272,7 +259,7 @@ Your answer must end with smile emoji
             """Create Plotly visualizations for supply chain data. Use this when users ask for charts, plots, or visual analysis."""
             
             start_time = time.time()
-            logger.info(f"Starting visualization creation: {query[:100]}...")
+            log_tool_call("create_visualization", query)
             
             try:
                 # Determine what type of visualization is needed
@@ -292,16 +279,18 @@ Your answer must end with smile emoji
                 execution_time = time.time() - start_time
                 
                 if result["type"] == "plotly":
-                    logger.info(f"Visualization created successfully: {result.get('description', 'unknown')}")
+                    log_visualization(result.get("description", "unknown"), 0, True)
+                    log_tool_result("create_visualization", "plotly", True)
                 else:
-                    logger.error(f"Visualization creation failed: {result.get('message')}")
+                    log_tool_result("create_visualization", "error", False, result.get("message"))
                 
-                logger.info(f"Visualization creation completed in {execution_time:.2f}s")
+                log_tool_call("create_visualization", query, execution_time)
                 return result
                 
             except Exception as e:
                 execution_time = time.time() - start_time
-                logger.error(f"Visualization creation failed in {execution_time:.2f}s: {e}")
+                log_tool_result("create_visualization", "error", False, str(e))
+                log_error(e, {"tool": "create_visualization", "query": query})
                 return {"type": "error", "message": f"Error creating visualization: {str(e)}"}
         
         self.analyze_tool = analyze_supply_chain_data
@@ -479,70 +468,149 @@ Your answer must end with smile emoji
             return {"type": "plotly", "chart": fig, "description": "Ranking chart based on your query"}
             
         except Exception as e:
-            log_error(e, {"context": "store_chart_data", "chart_type": chart_type})
-            return None
+            return {"type": "error", "message": f"Error creating ranking chart: {str(e)}"}
     
-    def get_latest_chart_data(self):
-        """Get the most recently stored chart data"""
-        if not self.chart_memory:
-            return None
-        
-        # Return the most recent chart
-        latest_id = max(self.chart_memory.keys(), 
-                       key=lambda k: self.chart_memory[k]["timestamp"])
-        return self.chart_memory[latest_id]
+    def _create_inventory_chart(self, query: str) -> Dict[str, Any]:
+        """Create inventory-related visualizations"""
+        try:
+            # SQL query for inventory levels by plant (lowercase columns)
+            sql_query = """
+            SELECT 
+                plant_name,
+                SUM(unrestricted_stock) as total_inventory
+            FROM inventory
+            WHERE unrestricted_stock > 0
+            GROUP BY plant_name
+            ORDER BY total_inventory DESC;
+            """
+            
+            df = pd.read_sql_query(sql_query, self.db._engine)
+            
+            if df.empty:
+                return {"type": "error", "message": "No inventory data found"}
+            
+            fig = px.pie(
+                df, 
+                values='total_inventory', 
+                names='plant_name',
+                title='Inventory Distribution by Plant'
+            )
+            
+            return {"type": "plotly", "chart": fig, "description": "Current inventory distribution across plants"}
+            
+        except Exception as e:
+            return {"type": "error", "message": f"Error creating inventory chart: {str(e)}"}
     
-    def get_chart_data_by_type(self, chart_type: str):
-        """Get the most recent chart data of a specific type"""
-        matching_charts = [
-            chart for chart in self.chart_memory.values() 
-            if chart["type"] == chart_type
-        ]
-        
-        if not matching_charts:
-            return None
-        
-        # Return the most recent of this type
-        return max(matching_charts, key=lambda c: c["timestamp"])
+    def _create_cost_chart(self, query: str) -> Dict[str, Any]:
+        """Create cost-related visualizations"""
+        try:
+            if 'storage' in query.lower():
+                # Storage costs by plant (lowercase columns)
+                sql_query = """
+                SELECT 
+                    entity_name as plant_name,
+                    cost_amount as storage_cost
+                FROM operation_costs
+                WHERE cost_type = 'Inventory Storage per MT per day'
+                ORDER BY storage_cost DESC;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                if df.empty:
+                    return {"type": "error", "message": "No storage cost data found"}
+                
+                fig = px.bar(
+                    df, 
+                    x='plant_name', 
+                    y='storage_cost',
+                    title='Storage Costs by Plant',
+                    labels={'storage_cost': 'Cost per MT per Day', 'plant_name': 'Plant'}
+                )
+                
+            elif 'transfer' in query.lower():
+                # Transfer costs by transport mode (lowercase columns)
+                sql_query = """
+                SELECT 
+                    entity_name as transport_mode,
+                    cost_amount as transfer_cost
+                FROM operation_costs
+                WHERE cost_type = 'Transfer cost per container (24.75MT)'
+                ORDER BY transfer_cost DESC;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                if df.empty:
+                    return {"type": "error", "message": "No transfer cost data found"}
+                
+                fig = px.bar(
+                    df, 
+                    x='transport_mode', 
+                    y='transfer_cost',
+                    title='Transfer Costs by Transport Mode',
+                    labels={'transfer_cost': 'Cost per Container', 'transport_mode': 'Transport Mode'}
+                )
+                
+            else:
+                # Default storage costs (lowercase columns)
+                sql_query = """
+                SELECT 
+                    entity_name as plant_name,
+                    cost_amount as storage_cost
+                FROM operation_costs
+                WHERE cost_type = 'Inventory Storage per MT per day'
+                ORDER BY storage_cost DESC;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                if df.empty:
+                    return {"type": "error", "message": "No cost data found"}
+                
+                fig = px.bar(df, x='plant_name', y='storage_cost', title='Storage Costs by Plant')
+            
+            fig.update_layout(xaxis_tickangle=-45)
+            return {"type": "plotly", "chart": fig, "description": "Cost analysis visualization"}
+            
+        except Exception as e:
+            return {"type": "error", "message": f"Error creating cost chart: {str(e)}"}
     
-    def has_recent_chart_data(self) -> bool:
-        """Check if there's any recent chart data available"""
-        return len(self.chart_memory) > 0
-    
-    def _setup_tools(self):
-        """Setup tools using the tools module"""
-        (
-            self.analyze_tool,
-            self.sql_tool,
-            self.bar_chart_tool,
-            self.line_chart_tool,
-            self.scatter_plot_tool,
-            self.histogram_tool,
-            self.monthly_trends_tool,
-            self.analyze_chart_data_tool
-        ) = create_supply_chain_tools(
-            db=self.db,
-            llm=self.llm,
-            memory=self.memory,
-            agent=self
-        )
+    def _create_general_chart(self, query: str) -> Dict[str, Any]:
+        """Create general visualizations"""
+        try:
+            # Default: transaction type distribution
+            sql_query = """
+            WITH transaction_counts AS (
+                SELECT 'INBOUND' as transaction_type, COUNT(*) as count FROM inbound
+                UNION ALL
+                SELECT 'OUTBOUND' as transaction_type, COUNT(*) as count FROM outbound
+            )
+            SELECT transaction_type, count FROM transaction_counts;
+            """
+            
+            df = pd.read_sql_query(sql_query, self.db._engine)
+            
+            if df.empty:
+                return {"type": "error", "message": "No transaction data found"}
+            
+            fig = px.pie(
+                df, 
+                values='count', 
+                names='transaction_type',
+                title='Transaction Type Distribution'
+            )
+            
+            return {"type": "plotly", "chart": fig, "description": "General overview of transaction types"}
+            
+        except Exception as e:
+            return {"type": "error", "message": f"Error creating general chart: {str(e)}"}
     
     def _setup_agent(self):
         """Setup the LangGraph agent with proper memory management"""
-        tools = [
-            self.analyze_tool,
-            self.sql_tool,
-            self.bar_chart_tool,
-            self.line_chart_tool,
-            self.scatter_plot_tool,
-            self.histogram_tool,
-            self.monthly_trends_tool,
-            self.analyze_chart_data_tool
-        ]
-        
         agent_node = create_react_agent(
             model=self.llm,
-            tools=tools
+            tools=[self.analyze_tool, self.visualize_tool]
         )
         
         graph = StateGraph(AgentState)
@@ -554,195 +622,85 @@ Your answer must end with smile emoji
         self.app = graph.compile(checkpointer=self.langgraph_memory)
     
     def process_query(self, query: str, thread_id: str = "default") -> Dict[str, Any]:
-        """
-        Process user query with proper memory management
-        
-        Args:
-            query: User's natural language query
-            thread_id: Session identifier for conversation persistence
-            
-        Returns:
-            Dict with response type, content, and optional chart/SQL data
-        """
+        """Process user query with proper memory management"""
         start_time = time.time()
-        logger.info(f"Processing query: {query[:100]}...")
+        log_query(query)
         
         try:
-            # Clear any previous query cache to avoid stale data
-            self.db.clear_query_cache()
-            
             # Create thread configuration for session persistence
             config = {"configurable": {"thread_id": thread_id}}
             
-            # Let the LLM agent decide which tools to use based on the query
-            messages = [HumanMessage(content=query)]
-            result = self.app.invoke({"messages": messages}, config)
+            # Determine if this is a visualization request
+            visualization_keywords = ['plot', 'chart', 'graph', 'show', 'visualize', 'display']
+            is_viz_request = any(keyword in query.lower() for keyword in visualization_keywords)
             
-            processing_time = time.time() - start_time
+            if is_viz_request:
+                # Handle visualization requests directly
+                viz_result = self.visualize_tool.invoke(query)
+                if viz_result["type"] == "plotly":
+                    response = {
+                        "type": "text_with_chart",
+                        "text": f"Here's a visualization based on your request: {viz_result['description']}",
+                        "chart": viz_result["chart"]
+                    }
+                    processing_time = time.time() - start_time
+                    log_agent_response("text_with_chart", len(response["text"]), processing_time)
+                    
+                    # Store in LangChain memory for pandas agent context
+                    self.memory.save_context(
+                        {"input": query},
+                        {"output": response["text"]}
+                    )
+                    
+                    return response
+                else:
+                    error_msg = viz_result.get("message", "Error creating visualization")
+                    processing_time = time.time() - start_time
+                    log_agent_response("error", len(error_msg), processing_time)
+                    return {"type": "error", "content": error_msg}
             
-            # Extract final response text
-            final_message = result["messages"][-1]
-            response_text = final_message.content if hasattr(final_message, 'content') else str(final_message)
-            
-            # Check for tool calls in the conversation to extract charts and SQL data
-            chart_data = None
-            sql_query = "No SQL query captured"
-            dataframe = None
-            
-            # Debug: Log the full result structure
-            log_agent_response(f"langgraph_messages_count_{len(result['messages'])}", 0, 0)
-            
-            # Find the index of the current user message (the one we just sent)
-            user_message_index = -1
-            for i, msg in enumerate(result["messages"]):
-                if hasattr(msg, 'content') and msg.content == query:
-                    user_message_index = i
-                    break
-            
-            # Only look at messages AFTER the current user input
-            if user_message_index >= 0:
-                current_request_messages = result["messages"][user_message_index + 1:]
+            # For data analysis questions and conversation memory
             else:
-                # Fallback: just look at the last few messages
-                current_request_messages = result["messages"][-4:] if len(result["messages"]) > 4 else result["messages"]
-            
-            log_agent_response(f"processing_messages_from_index_{user_message_index}", len(current_request_messages), 0)
-            
-            for i, msg in enumerate(current_request_messages):
-                # Debug logging
-                if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        log_agent_response(f"found_tool_call_{tc['name']}", 0, 0)
+                # Use enhanced SQL tool that captures query and DataFrame
+                analysis_result = self.analyze_tool.invoke(query)
                 
-                # Check for analyze_supply_chain_data tool calls
-                if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                    for tool_call in msg.tool_calls:
-                        if tool_call['name'] == 'analyze_supply_chain_data':
-                            # Find the corresponding tool response
-                            if i + 1 < len(current_request_messages):
-                                next_msg = current_request_messages[i + 1]
-                                if hasattr(next_msg, 'content'):
-                                    try:
-                                        # The content might be a string representation of the dict
-                                        import ast
-                                        if isinstance(next_msg.content, str) and next_msg.content.startswith('{'):
-                                            tool_result = ast.literal_eval(next_msg.content)
-                                        else:
-                                            tool_result = next_msg.content
-                                        
-                                        if isinstance(tool_result, dict):
-                                            sql_query = tool_result.get('sql_query', 'No SQL query captured')
-                                            dataframe = tool_result.get('dataframe')
-                                    except:
-                                        # If parsing fails, try to get from database cache
-                                        query_info = self.db.get_last_query_info()
-                                        sql_query = query_info.get("query", "No SQL query captured")
-                                        if sql_query and sql_query != "No SQL query captured":
-                                            try:
-                                                import pandas as pd
-                                                dataframe = pd.read_sql_query(sql_query, self.db._engine)
-                                            except:
-                                                pass
-                        
-                        # Check for chart tool calls
-                        elif tool_call['name'] in ['create_bar_chart', 'create_line_chart', 'create_scatter_plot', 'create_histogram', 'plot_monthly_transaction_trends']:
-                            # Find the corresponding tool response
-                            if i + 1 < len(current_request_messages):
-                                next_msg = current_request_messages[i + 1]
-                                if hasattr(next_msg, 'content'):
-                                    log_agent_response(f"chart_tool_response_type_{type(next_msg.content)}", 0, 0)
-                                    try:
-                                        import ast
-                                        if isinstance(next_msg.content, str) and next_msg.content.startswith('{'):
-                                            tool_result = ast.literal_eval(next_msg.content)
-                                            log_agent_response(f"parsed_tool_result_type_{tool_result.get('type')}", 0, 0)
-                                            if isinstance(tool_result, dict) and tool_result.get('type') == 'plotly':
-                                                # Convert JSON back to Plotly figure
-                                                try:
-                                                    import plotly.io as pio
-                                                    chart_json = tool_result.get('chart')
-                                                    if isinstance(chart_json, str):
-                                                        chart_fig = pio.from_json(chart_json)
-                                                        tool_result['chart'] = chart_fig
-                                                    chart_data = tool_result
-                                                except Exception as chart_error:
-                                                    log_error(chart_error, {"context": "chart_reconstruction"})
-                                                    chart_data = tool_result  # Use as-is if conversion fails
-                                    except:
-                                        pass
-            
-            # Store in memory
-            self.memory.save_context(
-                {"input": query},
-                {"output": response_text}
-            )
-            
-            # Check if this was a chart request by looking for chart-related keywords and tool calls
-            chart_keywords = ['plot', 'chart', 'graph', 'trend', 'visuali']
-            is_chart_request = any(keyword in query.lower() for keyword in chart_keywords)
-            
-            # If it's a chart request but we didn't extract chart data, try calling the tool directly
-            # BUT only if we don't already have SQL/dataframe from analyze_supply_chain_data
-            if is_chart_request and not chart_data and sql_query == "No SQL query captured":
-                log_agent_response("attempting_direct_chart_call", 0, 0)
-                if 'monthly' in query.lower() and ('trend' in query.lower() or 'transaction' in query.lower()):
-                    try:
-                        direct_chart = self.monthly_trends_tool.invoke({})
-                        if direct_chart.get('type') == 'plotly':
-                            # Convert JSON to Plotly figure
-                            import plotly.io as pio
-                            chart_json = direct_chart.get('chart')
-                            if isinstance(chart_json, str):
-                                chart_fig = pio.from_json(chart_json)
-                                chart_data = {
-                                    "type": "plotly",
-                                    "chart": chart_fig,
-                                    "description": direct_chart.get("description", "Monthly trends chart")
-                                }
-                                
-                                # Also get the SQL query and dataframe from the tool execution
-                                query_info = self.db.get_last_query_info()
-                                if query_info.get("query"):
-                                    sql_query = query_info["query"]
-                                    try:
-                                        import pandas as pd
-                                        dataframe = pd.read_sql_query(sql_query, self.db._engine)
-                                    except Exception as df_error:
-                                        log_error(df_error, {"context": "direct_chart_dataframe"})
-                                
-                                log_agent_response("direct_chart_success", 0, 0)
-                    except Exception as e:
-                        log_error(e, {"context": "direct_chart_call"})
-            
-            # Return appropriate format based on what was found
-            if chart_data:
-                log_agent_response("text_with_chart", len(response_text), processing_time)
-                return {
-                    "type": "text_with_chart",
-                    "text": response_text,
-                    "chart": chart_data.get("chart"),
-                    "sql_query": sql_query,
-                    "dataframe": dataframe
-                }
-            elif dataframe is not None or sql_query != "No SQL query captured":
-                log_agent_response("text_with_sql_and_dataframe", len(response_text), processing_time)
-                return {
-                    "type": "text_with_sql_and_dataframe",
-                    "text": response_text,
-                    "sql_query": sql_query,
-                    "dataframe": dataframe
-                }
-            else:
-                log_agent_response("text", len(response_text), processing_time)
-                return {
-                    "type": "text",
-                    "content": response_text
-                }
+                processing_time = time.time() - start_time
+                
+                # Handle the enhanced response with SQL and DataFrame
+                if isinstance(analysis_result, dict) and analysis_result.get("type") == "text_with_sql_and_dataframe":
+                    log_agent_response("text_with_sql_and_dataframe", len(analysis_result["text"]), processing_time)
+                    
+                    # Store in LangChain memory for context
+                    self.memory.save_context(
+                        {"input": query},
+                        {"output": analysis_result["text"]}
+                    )
+                    
+                    return analysis_result
+                    
+                # Handle error responses
+                elif isinstance(analysis_result, dict) and analysis_result.get("type") == "text":
+                    log_agent_response("error", len(analysis_result["content"]), processing_time)
+                    return {"type": "error", "content": analysis_result["content"]}
+                    
+                # Fallback for unexpected response format
+                else:
+                    # If tool returns just text (old format), wrap it
+                    response_text = str(analysis_result)
+                    log_agent_response("text", len(response_text), processing_time)
+                    
+                    self.memory.save_context(
+                        {"input": query},
+                        {"output": response_text}
+                    )
+                    
+                    return {"type": "text", "content": response_text}
                 
         except Exception as e:
             processing_time = time.time() - start_time
             error_msg = f"Error processing query: {str(e)}"
-            logger.error(f"Query processing failed in {processing_time:.2f}s: {e}")
+            log_error(e, {"query": query, "processing_time": processing_time})
+            log_agent_response("error", len(error_msg), processing_time)
             return {"type": "error", "content": error_msg}
     
     def get_conversation_history(self, thread_id: str = "default") -> List[BaseMessage]:
@@ -752,7 +710,7 @@ Your answer must end with smile emoji
             state = self.app.get_state(config)
             return state.values.get("messages", [])
         except Exception as e:
-            logger.error(f"Failed to get conversation history for thread {thread_id}: {e}")
+            log_error(e, {"method": "get_conversation_history", "thread_id": thread_id})
             return []
     
     def clear_memory(self, thread_id: str = "default"):
@@ -763,7 +721,7 @@ Your answer must end with smile emoji
             
             # Clear LangGraph state (note: MemorySaver doesn't have direct clear method)
             # Memory will naturally expire or can be handled at the application level
-            logger.info("Memory cleared successfully")
+            log_agent_response("memory_cleared", 0, 0)
             
         except Exception as e:
-            logger.error(f"Failed to clear memory for thread {thread_id}: {e}")
+            log_error(e, {"method": "clear_memory", "thread_id": thread_id})
