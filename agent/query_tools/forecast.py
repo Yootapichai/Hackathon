@@ -2,7 +2,7 @@ import requests
 
 from agent.query_tools.notification import warehouse_capacity
 
-def forecaset_agent():
+def forecast_agent():
     df = warehouse_capacity()
     payload = {
         "user_query":df.to_json(),
@@ -10,7 +10,8 @@ def forecaset_agent():
     response = requests.post("https://chanoot001.app.n8n.cloud/webhook/forecast", json=payload)
 
     print(response.text)
-    # print(response.json()[0]['output'])
-    # return response.json()[0]['output']
+    # Return the actual response content
+    return response.json()[0]['output']
 
-forecaset_agent()
+if __name__ == "__main__":
+    forecast_agent()

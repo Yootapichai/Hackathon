@@ -8,6 +8,8 @@ from utils.supply_chain_agent import SupplyChainAgent
 from agent.intent_agent import router_agent
 from agent.agent_flow import handle_router
 from agent.query_tools.monthly_throughput import analyst_thoughput
+from agent.query_tools.forecast import forecast_agent
+from agent.query_tools.notification import warehouse_capacity, calculate_capacity
 from loguru import logger
 
 load_dotenv()
@@ -70,6 +72,12 @@ def main():
         st.header("📊 Quick Analytics")
         if st.button("📈 Monthly Throughput Analysis"):
             st.session_state.call_throughput = True
+        
+        if st.button("🔮 Warehouse Forecast Analysis"):
+            st.session_state.call_forecast = True
+        
+        if st.button("🚨 Capacity Notification Check"):
+            st.session_state.call_capacity = True
         
         st.header("🔧 Settings")
         if st.button("🗑️ Clear Chat History"):
@@ -215,6 +223,114 @@ def main():
                         "content": error_msg
                     })
                     logger.error(f"Throughput analysis error: {str(e)}")
+    
+    # Handle forecast analysis button click
+    if "call_forecast" in st.session_state and st.session_state.call_forecast:
+        st.session_state.call_forecast = False
+        
+        # Add system message for forecast analysis
+        st.session_state.messages.append({
+            "role": "user", 
+            "type": "text", 
+            "content": "Warehouse Forecast Analysis"
+        })
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown("Warehouse Forecast Analysis")
+        
+        # Get forecast analysis
+        with st.chat_message("assistant"):
+            with st.spinner("🔮 Analyzing warehouse forecast..."):
+                try:
+                    forecast_result = forecast_agent()
+                    
+                    # Since forecast_agent returns text, display it directly
+                    st.markdown("**Warehouse Forecast Analysis Results:**")
+                    if forecast_result:
+                        st.markdown(forecast_result)
+                        
+                        # Store in message history
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "type": "text", 
+                            "content": f"**Warehouse Forecast Analysis Results:**\n\n{forecast_result}"
+                        })
+                    else:
+                        st.info("Forecast analysis completed. Check the logs for detailed results.")
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "type": "text", 
+                            "content": "Forecast analysis completed. Check the logs for detailed results."
+                        })
+                    
+                    logger.info("Warehouse forecast analysis completed")
+                    
+                except Exception as e:
+                    error_msg = f"❌ Error getting forecast analysis: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "type": "text", 
+                        "content": error_msg
+                    })
+                    logger.error(f"Forecast analysis error: {str(e)}")
+    
+    # Handle capacity notification button click
+    if "call_capacity" in st.session_state and st.session_state.call_capacity:
+        st.session_state.call_capacity = False
+        
+        # Add system message for capacity check
+        st.session_state.messages.append({
+            "role": "user", 
+            "type": "text", 
+            "content": "Capacity Notification Check"
+        })
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown("Capacity Notification Check")
+        
+        # Get capacity analysis
+        with st.chat_message("assistant"):
+            with st.spinner("🚨 Checking warehouse capacity..."):
+                try:
+                    # Get warehouse capacity data
+                    df = warehouse_capacity()
+                    capacity_result = calculate_capacity(df)
+                    
+                    st.markdown("**Warehouse Capacity Notification Results:**")
+                    
+                    # Check if result is a DataFrame (problematic warehouses) or string (all good)
+                    if isinstance(capacity_result, str):
+                        st.success(f"✅ {capacity_result}")
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "type": "text", 
+                            "content": f"**Warehouse Capacity Notification Results:**\n\n✅ {capacity_result}"
+                        })
+                    else:
+                        # Show problematic warehouses
+                        st.warning("⚠️ **Capacity Alert!** The following warehouses have inventory at 80% or more of capacity:")
+                        st.dataframe(capacity_result, use_container_width=True)
+                        
+                        # Store in message history
+                        st.session_state.messages.extend([
+                            {"role": "assistant", "type": "text", "content": "**Warehouse Capacity Notification Results:**\n\n⚠️ **Capacity Alert!** The following warehouses have inventory at 80% or more of capacity:"},
+                            {"role": "assistant", "type": "dataframe", "content": capacity_result}
+                        ])
+                    
+                    logger.info(f"Capacity notification check completed")
+                    
+                except Exception as e:
+                    error_msg = f"❌ Error checking capacity: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "type": "text", 
+                        "content": error_msg
+                    })
+                    logger.error(f"Capacity check error: {str(e)}")
     
     if user_input:
         logger.info(f"User query: {user_input[:100]}")
