@@ -663,9 +663,40 @@ class SupplyChainAgent:
             # Clear LangChain memory
             self.memory.clear()
             
-            # Clear LangGraph state (note: MemorySaver doesn't have direct clear method)
-            # Memory will naturally expire or can be handled at the application level
-            logger.info("Memory cleared successfully")
+            # Clear LangGraph state by updating with empty messages
+            config = {"configurable": {"thread_id": thread_id}}
+            
+            # Update the thread state with empty messages
+            self.app.update_state(config, {"messages": []})
+            
+            # Also clear chart memory
+            self.chart_memory.clear()
+            
+            # Clear the SQLite database completely to ensure no cross-session memory
+            try:
+                if hasattr(self.langgraph_memory, 'conn'):
+                    cursor = self.langgraph_memory.conn.cursor()
+                    
+                    # Get all tables in the database
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = cursor.fetchall()
+                    
+                    # Clear all tables that exist
+                    cleared_tables = []
+                    for table in tables:
+                        table_name = table[0]
+                        try:
+                            cursor.execute(f"DELETE FROM {table_name}")
+                            cleared_tables.append(table_name)
+                        except Exception as table_error:
+                            logger.debug(f"Could not clear table {table_name}: {table_error}")
+                    
+                    self.langgraph_memory.conn.commit()
+                    logger.info(f"SQLite conversation database cleared ({len(cleared_tables)} tables)")
+            except Exception as db_error:
+                logger.warning(f"Could not clear SQLite database: {db_error}")
+            
+            logger.info(f"Memory cleared successfully for thread {thread_id}")
             
         except Exception as e:
             logger.error(f"Failed to clear memory for thread {thread_id}: {e}")
