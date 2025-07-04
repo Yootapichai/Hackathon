@@ -58,7 +58,7 @@ def main():
         
         st.header("💡 Sample Questions")
         sample_questions = [
-            "Show inventory levels for all materials",
+            "Show top 5 inventory on Singapore Warehouse",
             "What are the top 5 materials by outbound volume?",
             "Plot monthly transaction trends",
             "Which plants have the highest storage costs?",

@@ -60,22 +60,10 @@ class SupplyChainAgent:
                 error_msg = "GOOGLE_API_KEY environment variable is required"
                 logger.error(f"Agent initialization failed: {error_msg}")
                 raise ValueError(error_msg)
-            
-            # _llm = ChatOpenAI(
-            #     openai_api_key="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",
-            #     openai_api_base="https://openrouter.ai/api/v1",
-            #     model_name="openai/gpt-4o-mini",
-            #     temperature=0.0,
-            #     top_p=0.9,
-            #     frequency_penalty=0.0,
-            #     presence_penalty=0.0
-            # )
-
-            # self.llm = _llm
 
             # Initialize LLM
             self.llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-flash",
                 google_api_key=self.google_api_key,
                 temperature=0.0,
                 verbose=True
@@ -421,7 +409,7 @@ class SupplyChainAgent:
         
         agent_node = create_react_agent(
             model=self.llm,
-            tools=tools
+            tools=tools,
         )
         
         graph = StateGraph(AgentState)
