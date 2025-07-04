@@ -7,7 +7,7 @@ Separated from the main agent for better code organization and maintainability.
 
 import os
 from langchain_community.utilities import SQLDatabase
-from .logger import log_error, log_agent_response, log_dataframe_operation
+from loguru import logger
 
 
 class QueryCapturingSQLDatabase(SQLDatabase):
@@ -79,14 +79,14 @@ def create_database_connection():
         # Log successful connection
         try:
             table_names = db.get_usable_table_names()
-            log_agent_response("sql_connection_initialized", len(table_names), 0)
+            logger.info(f"SQL connection initialized with {len(table_names)} tables")
             for table in table_names:
-                log_dataframe_operation("sql_table_available", table, (0, 0))
+                logger.debug(f"SQL table available: {table}")
         except Exception as e:
-            log_error(e, {"component": "database_logging"})
+            logger.error(f"Database logging error: {e}")
         
         return db
         
     except Exception as e:
-        log_error(e, {"component": "database_connection"})
+        logger.error(f"Database connection failed: {e}")
         raise

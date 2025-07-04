@@ -5,7 +5,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import sqlparse
 from utils.supply_chain_agent import SupplyChainAgent
-from utils.logger import log_streamlit_event
+from loguru import logger
 
 load_dotenv()
 
@@ -66,7 +66,7 @@ def main():
         
         st.header("🔧 Settings")
         if st.button("🗑️ Clear Chat History"):
-            log_streamlit_event("clear_chat_history")
+            logger.info("Chat history cleared by user")
             st.session_state.messages = []
             if "agent" in st.session_state:
                 # Clear both LangChain and LangGraph memory
@@ -164,7 +164,7 @@ def main():
         st.session_state.user_input = ""
     
     if user_input:
-        log_streamlit_event("user_query", {"query": user_input[:100]})
+        logger.info(f"User query: {user_input[:100]}")
         
         # Add user message
         st.session_state.messages.append({"role": "user", "type": "text", "content": user_input})
@@ -190,7 +190,7 @@ def main():
                             "type": "text", 
                             "content": response["content"]
                         })
-                        log_streamlit_event("response_text", {"length": len(response["content"])})
+                        logger.info(f"Generated text response: {len(response['content'])} characters")
                     
                     elif response["type"] == "text_with_chart":
                         st.markdown(response["text"])
@@ -199,7 +199,7 @@ def main():
                             {"role": "assistant", "type": "text", "content": response["text"]},
                             {"role": "assistant", "type": "plotly", "content": response["chart"]}
                         ])
-                        log_streamlit_event("response_chart", {"text_length": len(response["text"])})
+                        logger.info(f"Generated chart response with text: {len(response['text'])} characters")
                     
                     elif response["type"] == "text_with_dataframe":
                         st.markdown(response["text"])
@@ -208,7 +208,7 @@ def main():
                             {"role": "assistant", "type": "text", "content": response["text"]},
                             {"role": "assistant", "type": "dataframe", "content": response["dataframe"]}
                         ])
-                        log_streamlit_event("response_dataframe", {"text_length": len(response["text"])})
+                        logger.info(f"Generated dataframe response with text: {len(response['text'])} characters")
                     
                     elif response["type"] == "text_with_sql_and_dataframe":
                         # Display natural language answer
@@ -230,11 +230,9 @@ def main():
                             {"role": "assistant", "type": "dataframe", "content": response["dataframe"]},
                             {"role": "assistant", "type": "sql_query", "content": response["sql_query"]}
                         ])
-                        log_streamlit_event("response_sql_and_dataframe", {
-                            "text_length": len(response["text"]),
-                            "dataframe_shape": response["dataframe"].shape if response["dataframe"] is not None else None,
-                            "sql_length": len(response["sql_query"]) if response["sql_query"] else 0
-                        })
+                        dataframe_shape = response["dataframe"].shape if response["dataframe"] is not None else None
+                        sql_length = len(response["sql_query"]) if response["sql_query"] else 0
+                        logger.info(f"Generated SQL and dataframe response: {len(response['text'])} chars, shape {dataframe_shape}, SQL {sql_length} chars")
                     
                     elif response["type"] == "error":
                         st.error(f"❌ {response['content']}")
@@ -243,7 +241,7 @@ def main():
                             "type": "text", 
                             "content": f"❌ {response['content']}"
                         })
-                        log_streamlit_event("response_error", {"error": response['content']})
+                        logger.error(f"Response error: {response['content']}")
                         
                 except Exception as e:
                     error_msg = f"❌ An error occurred: {str(e)}"
@@ -253,7 +251,7 @@ def main():
                         "type": "text", 
                         "content": error_msg
                     })
-                    log_streamlit_event("streamlit_error", {"error": str(e)})
+                    logger.error(f"Streamlit error: {str(e)}")
 
 if __name__ == "__main__":
     main()

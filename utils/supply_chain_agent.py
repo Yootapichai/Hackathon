@@ -30,9 +30,6 @@ from dotenv import load_dotenv
 # Import custom modules
 from .database import QueryCapturingSQLDatabase, create_database_connection
 from .tools import create_supply_chain_tools
-from .logger import (
-    log_query, log_agent_response, log_error
-)
 from loguru import logger
 
 load_dotenv()
@@ -164,9 +161,9 @@ class SupplyChainAgent:
                               key=lambda k: self.chart_memory[k]["timestamp"])
                 del self.chart_memory[oldest_id]
             
-            log_agent_response(f"stored_chart_data_{chart_type}", len(dataframe) if dataframe is not None else 0, 0)
+            logger.info(f"Stored chart data for {chart_type}: {len(dataframe) if dataframe is not None else 0} rows")
         except Exception as e:
-            log_error(e, {"context": "store_chart_data", "chart_type": chart_type})
+            logger.error(f"Error storing chart data for {chart_type}: {e}")
             return chart_id
     def _create_database_connection(self):
         """Create connection to Supabase PostgreSQL database"""
@@ -361,7 +358,7 @@ class SupplyChainAgent:
             return {"type": "plotly", "chart": fig, "description": "Ranking chart based on your query"}
             
         except Exception as e:
-            log_error(e, {"context": "_create_ranking_chart", "query": query})
+            logger.error(f"Error creating ranking chart for query '{query}': {e}")
             return {"type": "error", "message": f"Error creating ranking chart: {str(e)}"}
     
     def get_latest_chart_data(self):
@@ -495,7 +492,7 @@ class SupplyChainAgent:
             dataframe = None
             
             # Debug: Log the full result structure
-            log_agent_response(f"langgraph_messages_count_{len(result['messages'])}", 0, 0)
+            logger.debug(f"LangGraph returned {len(result['messages'])} messages")
             
             # Find the index of the current user message (the one we just sent)
             user_message_index = -1
@@ -511,13 +508,13 @@ class SupplyChainAgent:
                 # Fallback: just look at the last few messages
                 current_request_messages = result["messages"][-4:] if len(result["messages"]) > 4 else result["messages"]
             
-            log_agent_response(f"processing_messages_from_index_{user_message_index}", len(current_request_messages), 0)
+            logger.debug(f"Processing {len(current_request_messages)} messages from index {user_message_index}")
             
             for i, msg in enumerate(current_request_messages):
                 # Debug logging
                 if hasattr(msg, 'tool_calls') and msg.tool_calls:
                     for tc in msg.tool_calls:
-                        log_agent_response(f"found_tool_call_{tc['name']}", 0, 0)
+                        logger.debug(f"Found tool call: {tc['name']}")
                 
                 # Check for analyze_supply_chain_data tool calls
                 if hasattr(msg, 'tool_calls') and msg.tool_calls:
@@ -555,12 +552,12 @@ class SupplyChainAgent:
                             if i + 1 < len(current_request_messages):
                                 next_msg = current_request_messages[i + 1]
                                 if hasattr(next_msg, 'content'):
-                                    log_agent_response(f"chart_tool_response_type_{type(next_msg.content)}", 0, 0)
+                                    logger.debug(f"Chart tool response type: {type(next_msg.content)}")
                                     try:
                                         import ast
                                         if isinstance(next_msg.content, str) and next_msg.content.startswith('{'):
                                             tool_result = ast.literal_eval(next_msg.content)
-                                            log_agent_response(f"parsed_tool_result_type_{tool_result.get('type')}", 0, 0)
+                                            logger.debug(f"Parsed tool result type: {tool_result.get('type')}")
                                             if isinstance(tool_result, dict) and tool_result.get('type') == 'plotly':
                                                 # Convert JSON back to Plotly figure
                                                 try:
@@ -571,7 +568,7 @@ class SupplyChainAgent:
                                                         tool_result['chart'] = chart_fig
                                                     chart_data = tool_result
                                                 except Exception as chart_error:
-                                                    log_error(chart_error, {"context": "chart_reconstruction"})
+                                                    logger.error(f"Chart reconstruction error: {chart_error}")
                                                     chart_data = tool_result  # Use as-is if conversion fails
                                     except:
                                         pass
@@ -589,7 +586,7 @@ class SupplyChainAgent:
             # If it's a chart request but we didn't extract chart data, try calling the tool directly
             # BUT only if we don't already have SQL/dataframe from analyze_supply_chain_data
             if is_chart_request and not chart_data and sql_query == "No SQL query captured":
-                log_agent_response("attempting_direct_chart_call", 0, 0)
+                logger.debug("Attempting direct chart call")
                 if 'monthly' in query.lower() and ('trend' in query.lower() or 'transaction' in query.lower()):
                     try:
                         direct_chart = self.monthly_trends_tool.invoke({})
@@ -613,15 +610,15 @@ class SupplyChainAgent:
                                         import pandas as pd
                                         dataframe = pd.read_sql_query(sql_query, self.db._engine)
                                     except Exception as df_error:
-                                        log_error(df_error, {"context": "direct_chart_dataframe"})
+                                        logger.error(f"Direct chart dataframe error: {df_error}")
                                 
-                                log_agent_response("direct_chart_success", 0, 0)
+                                logger.debug("Direct chart call successful")
                     except Exception as e:
-                        log_error(e, {"context": "direct_chart_call"})
+                        logger.error(f"Direct chart call error: {e}")
             
             # Return appropriate format based on what was found
             if chart_data:
-                log_agent_response("text_with_chart", len(response_text), processing_time)
+                logger.info(f"Generated text with chart response: {len(response_text)} chars in {processing_time:.2f}s")
                 return {
                     "type": "text_with_chart",
                     "text": response_text,
@@ -630,7 +627,7 @@ class SupplyChainAgent:
                     "dataframe": dataframe
                 }
             elif dataframe is not None or sql_query != "No SQL query captured":
-                log_agent_response("text_with_sql_and_dataframe", len(response_text), processing_time)
+                logger.info(f"Generated text with SQL and dataframe response: {len(response_text)} chars in {processing_time:.2f}s")
                 return {
                     "type": "text_with_sql_and_dataframe",
                     "text": response_text,
@@ -638,7 +635,7 @@ class SupplyChainAgent:
                     "dataframe": dataframe
                 }
             else:
-                log_agent_response("text", len(response_text), processing_time)
+                logger.info(f"Generated text response: {len(response_text)} chars in {processing_time:.2f}s")
                 return {
                     "type": "text",
                     "content": response_text

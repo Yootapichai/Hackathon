@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from typing import Dict, Any, Optional
 from langchain.tools import tool
-from .logger import log_tool_call, log_tool_result, log_error, log_dataframe_operation, log_visualization
+from loguru import logger
 
 
 def create_supply_chain_tools(db, llm, memory, agent=None):
@@ -34,7 +34,7 @@ def create_supply_chain_tools(db, llm, memory, agent=None):
         """Analyze supply chain data using SQL queries. Returns SQL, DataFrame, and natural language answer."""
         
         start_time = time.time()
-        log_tool_call("analyze_supply_chain_data", query)
+        logger.info(f"Tool call: analyze_supply_chain_data with query: {query[:100]}")
         
         try:
             from langchain_community.agent_toolkits.sql.base import create_sql_agent
@@ -98,7 +98,7 @@ Your answer must end with smile emoji
                     memory=memory
                 )
             except Exception as e:
-                log_error(e, {"fallback": "trying without memory"})
+                logger.error(f"SQL agent creation failed, trying without memory: {e}")
                 # Fallback without memory if it causes issues
                 agent = create_sql_agent(
                     llm=llm,
@@ -122,15 +122,14 @@ Your answer must end with smile emoji
                 try:
                     # Execute the same query to get DataFrame
                     dataframe = pd.read_sql_query(sql_query, db._engine)
-                    log_dataframe_operation("sql_query_result", "captured", dataframe.shape)
+                    logger.info(f"Created DataFrame from SQL query result: shape {dataframe.shape}")
                 except Exception as df_error:
-                    log_error(df_error, {"context": "dataframe_creation", "sql": sql_query})
+                    logger.error(f"DataFrame creation failed for SQL query: {df_error}")
                     # If DataFrame creation fails, still return the text result
                     pass
             
             execution_time = time.time() - start_time
-            log_tool_result("analyze_supply_chain_data", "enhanced_sql_response", True)
-            log_tool_call("analyze_supply_chain_data", query, execution_time)
+            logger.info(f"Tool analyze_supply_chain_data completed successfully in {execution_time:.2f}s")
             
             # Return structured response
             return {
@@ -142,8 +141,7 @@ Your answer must end with smile emoji
             
         except Exception as e:
             execution_time = time.time() - start_time
-            log_tool_result("analyze_supply_chain_data", "error", False, str(e))
-            log_error(e, {"tool": "analyze_supply_chain_data", "query": query})
+            logger.error(f"Tool analyze_supply_chain_data failed for query '{query[:100]}': {e}")
             
             # Return error as text-only response
             return {
@@ -171,7 +169,7 @@ Your answer must end with smile emoji
         start_time = time.time()
         
         # Debug logging
-        log_tool_call("execute_sql_for_chart", f"Type: {type(sql_query)}, Value: {str(sql_query)[:100]}")
+        logger.info(f"Tool call: execute_sql_for_chart with SQL: {str(sql_query)[:100]}")
         
         try:
             # Ensure sql_query is a string (handle immutabledict from LangGraph)
@@ -185,9 +183,7 @@ Your answer must end with smile emoji
             df = pd.read_sql_query(sql_query, db._engine)
             
             execution_time = time.time() - start_time
-            log_dataframe_operation("sql_chart_query", "executed", df.shape)
-            log_tool_result("execute_sql_for_chart", "success", True)
-            log_tool_call("execute_sql_for_chart", sql_query, execution_time)
+            logger.info(f"Tool execute_sql_for_chart completed successfully: shape {df.shape} in {execution_time:.2f}s")
             
             return {
                 "type": "dataframe",
@@ -198,8 +194,7 @@ Your answer must end with smile emoji
             
         except Exception as e:
             execution_time = time.time() - start_time
-            log_tool_result("execute_sql_for_chart", "error", False, str(e))
-            log_error(e, {"tool": "execute_sql_for_chart", "sql": sql_query})
+            logger.error(f"Tool execute_sql_for_chart failed: {e}")
             
             return {
                 "type": "error",
@@ -241,7 +236,7 @@ Your answer must end with smile emoji
         y_column = str(y_column) if not isinstance(y_column, str) else y_column
         title = str(title) if not isinstance(title, str) else title
         
-        log_tool_call("create_bar_chart", f"{title} | {x_column} vs {y_column}")
+        logger.info(f"Tool call: create_bar_chart - {title} ({x_column} vs {y_column})")
         
         try:
             # Ensure data_query is a string (handle immutabledict from LangGraph)
@@ -262,7 +257,7 @@ Your answer must end with smile emoji
                     df = pd.read_sql_query(data_query, db._engine)
                 except Exception as sql_error:
                     # SQL failed, fall back to using last query
-                    log_error(sql_error, {"context": "chart_sql_fallback", "sql": data_query[:200]})
+                    logger.error(f"Chart SQL fallback failed: {sql_error}")
                     query_info = db.get_last_query_info()
                     if query_info.get("query"):
                         df = pd.read_sql_query(query_info["query"], db._engine)
@@ -302,9 +297,7 @@ Your answer must end with smile emoji
             )
             
             execution_time = time.time() - start_time
-            log_visualization("bar_chart", len(df), True)
-            log_tool_result("create_bar_chart", "success", True)
-            log_tool_call("create_bar_chart", title, execution_time)
+            logger.info(f"Tool create_bar_chart completed successfully: {len(df)} data points in {execution_time:.2f}s")
             
             # Store chart data in agent memory if agent is available
             if agent:
@@ -330,8 +323,7 @@ Your answer must end with smile emoji
             
         except Exception as e:
             execution_time = time.time() - start_time
-            log_tool_result("create_bar_chart", "error", False, str(e))
-            log_error(e, {"tool": "create_bar_chart", "title": title})
+            logger.error(f"Tool create_bar_chart failed for '{title}': {e}")
             return {"type": "error", "message": f"Error creating bar chart: {str(e)}"}
     
     @tool
@@ -373,7 +365,7 @@ Your answer must end with smile emoji
         y_column = str(y_column) if not isinstance(y_column, str) else y_column
         title = str(title) if not isinstance(title, str) else title
         
-        log_tool_call("create_line_chart", f"{title} | {x_column} vs {y_column}")
+        logger.info(f"Tool call: create_line_chart - {title} ({x_column} vs {y_column})")
         
         try:
             # Ensure data_query is a string (handle immutabledict from LangGraph)
@@ -394,7 +386,7 @@ Your answer must end with smile emoji
                     df = pd.read_sql_query(data_query, db._engine)
                 except Exception as sql_error:
                     # SQL failed, fall back to using last query
-                    log_error(sql_error, {"context": "chart_sql_fallback", "sql": data_query[:200]})
+                    logger.error(f"Chart SQL fallback failed: {sql_error}")
                     query_info = db.get_last_query_info()
                     if query_info.get("query"):
                         df = pd.read_sql_query(query_info["query"], db._engine)
@@ -438,9 +430,7 @@ Your answer must end with smile emoji
             )
             
             execution_time = time.time() - start_time
-            log_visualization("line_chart", len(df), True)
-            log_tool_result("create_line_chart", "success", True)
-            log_tool_call("create_line_chart", title, execution_time)
+            logger.info(f"Tool create_line_chart completed successfully: {len(df)} data points in {execution_time:.2f}s")
             
             # Store chart data in agent memory if agent is available
             if agent:
@@ -466,8 +456,7 @@ Your answer must end with smile emoji
             
         except Exception as e:
             execution_time = time.time() - start_time
-            log_tool_result("create_line_chart", "error", False, str(e))
-            log_error(e, {"tool": "create_line_chart", "title": title})
+            logger.error(f"Tool create_line_chart failed for '{title}': {e}")
             return {"type": "error", "message": f"Error creating line chart: {str(e)}"}
     
     @tool
@@ -501,7 +490,7 @@ Your answer must end with smile emoji
         y_column = str(y_column) if not isinstance(y_column, str) else y_column
         title = str(title) if not isinstance(title, str) else title
         
-        log_tool_call("create_scatter_plot", f"{title} | {x_column} vs {y_column}")
+        logger.info(f"Tool call: create_scatter_plot - {title} ({x_column} vs {y_column})")
         
         try:
             # Ensure data_query is a string (handle immutabledict from LangGraph)
@@ -522,7 +511,7 @@ Your answer must end with smile emoji
                     df = pd.read_sql_query(data_query, db._engine)
                 except Exception as sql_error:
                     # SQL failed, fall back to using last query
-                    log_error(sql_error, {"context": "chart_sql_fallback", "sql": data_query[:200]})
+                    logger.error(f"Chart SQL fallback failed: {sql_error}")
                     query_info = db.get_last_query_info()
                     if query_info.get("query"):
                         df = pd.read_sql_query(query_info["query"], db._engine)
@@ -560,9 +549,7 @@ Your answer must end with smile emoji
             fig.update_layout(showlegend=bool(color_column))
             
             execution_time = time.time() - start_time
-            log_visualization("scatter_plot", len(df), True)
-            log_tool_result("create_scatter_plot", "success", True)
-            log_tool_call("create_scatter_plot", title, execution_time)
+            logger.info(f"Tool create_scatter_plot completed successfully: {len(df)} data points in {execution_time:.2f}s")
             
             # Store chart data in agent memory if agent is available
             if agent:
@@ -588,8 +575,7 @@ Your answer must end with smile emoji
             
         except Exception as e:
             execution_time = time.time() - start_time
-            log_tool_result("create_scatter_plot", "error", False, str(e))
-            log_error(e, {"tool": "create_scatter_plot", "title": title})
+            logger.error(f"Tool create_scatter_plot failed for '{title}': {e}")
             return {"type": "error", "message": f"Error creating scatter plot: {str(e)}"}
     
     @tool
@@ -620,7 +606,7 @@ Your answer must end with smile emoji
         column = str(column) if not isinstance(column, str) else column
         title = str(title) if not isinstance(title, str) else title
         
-        log_tool_call("create_histogram", f"{title} | {column}")
+        logger.info(f"Tool call: create_histogram - {title} ({column})")
         
         try:
             # Ensure data_query is a string (handle immutabledict from LangGraph)
@@ -641,7 +627,7 @@ Your answer must end with smile emoji
                     df = pd.read_sql_query(data_query, db._engine)
                 except Exception as sql_error:
                     # SQL failed, fall back to using last query
-                    log_error(sql_error, {"context": "chart_sql_fallback", "sql": data_query[:200]})
+                    logger.error(f"Chart SQL fallback failed: {sql_error}")
                     query_info = db.get_last_query_info()
                     if query_info.get("query"):
                         df = pd.read_sql_query(query_info["query"], db._engine)
@@ -678,9 +664,7 @@ Your answer must end with smile emoji
             )
             
             execution_time = time.time() - start_time
-            log_visualization("histogram", len(df), True)
-            log_tool_result("create_histogram", "success", True)
-            log_tool_call("create_histogram", title, execution_time)
+            logger.info(f"Tool create_histogram completed successfully: {len(df)} data points in {execution_time:.2f}s")
             
             # Store chart data in agent memory if agent is available
             if agent:
@@ -706,8 +690,7 @@ Your answer must end with smile emoji
             
         except Exception as e:
             execution_time = time.time() - start_time
-            log_tool_result("create_histogram", "error", False, str(e))
-            log_error(e, {"tool": "create_histogram", "title": title})
+            logger.error(f"Tool create_histogram failed for '{title}': {e}")
             return {"type": "error", "message": f"Error creating histogram: {str(e)}"}
     
     @tool
@@ -727,7 +710,7 @@ Your answer must end with smile emoji
             question: The question about the existing chart data
         """
         start_time = time.time()
-        log_tool_call("analyze_existing_chart_data", question)
+        logger.info(f"Tool call: analyze_existing_chart_data - {question[:100]}")
         
         try:
             # Check if agent is available and has chart data
@@ -844,8 +827,7 @@ Your answer must end with smile emoji
                 analysis_result = f"Chart data has {len(df)} rows with columns: {', '.join(df.columns)}. Please ask a more specific question about the data."
             
             execution_time = time.time() - start_time
-            log_tool_result("analyze_existing_chart_data", "success", True)
-            log_tool_call("analyze_existing_chart_data", question, execution_time)
+            logger.info(f"Tool analyze_existing_chart_data completed successfully in {execution_time:.2f}s")
             
             return {
                 "type": "chart_analysis",
@@ -857,8 +839,7 @@ Your answer must end with smile emoji
             
         except Exception as e:
             execution_time = time.time() - start_time
-            log_tool_result("analyze_existing_chart_data", "error", False, str(e))
-            log_error(e, {"tool": "analyze_existing_chart_data", "question": question})
+            logger.error(f"Tool analyze_existing_chart_data failed for question '{question[:100]}': {e}")
             return {"type": "error", "message": f"Error analyzing chart data: {str(e)}"}
     
     @tool
@@ -869,7 +850,7 @@ Your answer must end with smile emoji
         This tool handles the data query and chart creation automatically.
         """
         start_time = time.time()
-        log_tool_call("plot_monthly_transaction_trends", "Monthly transaction trends")
+        logger.info("Tool call: plot_monthly_transaction_trends")
         
         try:
             # SQL query for monthly transaction trends using proper PostgreSQL syntax
@@ -923,9 +904,7 @@ Your answer must end with smile emoji
             )
             
             execution_time = time.time() - start_time
-            log_visualization("monthly_trends", len(df), True)
-            log_tool_result("plot_monthly_transaction_trends", "success", True)
-            log_tool_call("plot_monthly_transaction_trends", "Monthly transaction trends", execution_time)
+            logger.info(f"Tool plot_monthly_transaction_trends completed successfully: {len(df)} data points in {execution_time:.2f}s")
             
             # Store chart data in agent memory if agent is available
             if agent:
@@ -944,8 +923,7 @@ Your answer must end with smile emoji
             
         except Exception as e:
             execution_time = time.time() - start_time
-            log_tool_result("plot_monthly_transaction_trends", "error", False, str(e))
-            log_error(e, {"tool": "plot_monthly_transaction_trends"})
+            logger.error(f"Tool plot_monthly_transaction_trends failed: {e}")
             return {"type": "error", "message": f"Error creating monthly trends chart: {str(e)}"}
     
     return (
