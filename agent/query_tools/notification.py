@@ -1,6 +1,4 @@
 from forecast_loader import extract_from_xlsx
-import pandas as pd
-
 
 def warehouse_capacity():
     df = extract_from_xlsx()
@@ -9,7 +7,6 @@ def warehouse_capacity():
         'Predicted Outbound (KT)': 'Predicted_Outbound_KT',
         'Predicted Inventory (KT)': 'Predicted_Inventory_KT'
     })
-    print(df)
     return df
 
 def calculate_capacity(df):
