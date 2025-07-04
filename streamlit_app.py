@@ -7,6 +7,7 @@ import sqlparse
 from utils.supply_chain_agent import SupplyChainAgent
 from agent.intent_agent import router_agent
 from agent.agent_flow import handle_router
+from agent.query_tools.monthly_throughput import analyst_thoughput
 from loguru import logger
 
 load_dotenv()
@@ -65,6 +66,10 @@ def main():
         for question in sample_questions:
             if st.button(question, key=f"sample_{hash(question)}"):
                 st.session_state.user_input = question
+        
+        st.header("📊 Quick Analytics")
+        if st.button("📈 Monthly Throughput Analysis"):
+            st.session_state.call_throughput = True
         
         st.header("🔧 Settings")
         if st.button("🗑️ Clear Chat History"):
@@ -164,6 +169,52 @@ def main():
     if "user_input" in st.session_state and st.session_state.user_input:
         user_input = st.session_state.user_input
         st.session_state.user_input = ""
+    
+    # Handle throughput analysis button click
+    if "call_throughput" in st.session_state and st.session_state.call_throughput:
+        st.session_state.call_throughput = False
+        
+        # Add system message for throughput analysis
+        st.session_state.messages.append({
+            "role": "user", 
+            "type": "text", 
+            "content": "Monthly Throughput Analysis"
+        })
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown("Monthly Throughput Analysis")
+        
+        # Get throughput analysis
+        with st.chat_message("assistant"):
+            with st.spinner("🔄 Analyzing monthly throughput..."):
+                try:
+                    throughput_data = analyst_thoughput()
+                    
+                    # Convert to DataFrame for better display
+                    import pandas as pd
+                    df = pd.DataFrame(throughput_data)
+                    
+                    st.markdown("**Monthly Throughput Analysis Results:**")
+                    st.dataframe(df, use_container_width=True)
+                    
+                    # Store in message history
+                    st.session_state.messages.extend([
+                        {"role": "assistant", "type": "text", "content": "**Monthly Throughput Analysis Results:**"},
+                        {"role": "assistant", "type": "dataframe", "content": df}
+                    ])
+                    
+                    logger.info(f"Monthly throughput analysis completed with {len(throughput_data)} records")
+                    
+                except Exception as e:
+                    error_msg = f"❌ Error getting throughput analysis: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "type": "text", 
+                        "content": error_msg
+                    })
+                    logger.error(f"Throughput analysis error: {str(e)}")
     
     if user_input:
         logger.info(f"User query: {user_input[:100]}")

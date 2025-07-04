@@ -10,4 +10,5 @@ def analyst_thoughput(question:str = ""):
     print(df)
     return response.json()
 
-analyst_thoughput()
+if __name__ == "__main__":
+    analyst_thoughput()
