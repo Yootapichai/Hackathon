@@ -62,47 +62,72 @@ def read_forecast_excel(file_path):
     # Parse China data
     warehouses['CHINA'] = parse_warehouse_data(df, 'CHINA', 13, 17, 18, date_columns)
 
+    return warehouses
+
 def format_for_llm(warehouses_data):
     """
     Format the data in multiple LLM-friendly formats
     """
     
     # Format 1: Structured JSON
-    print("=== JSON FORMAT ===")
-    print(json.dumps(warehouses_data, indent=2))
+    # print("=== JSON FORMAT ===")
+    # print(json.dumps(warehouses_data, indent=2))
     
     # Format 2: Tabular CSV-like format
-    print("\n=== TABULAR FORMAT ===")
+    # print("\n=== TABULAR FORMAT ===")
+    # Create a list to collect all rows
+    all_rows = []
+    
     for warehouse_name, data in warehouses_data.items():
-        print(f"\n{warehouse_name} WAREHOUSE:")
-        print("Date,Capacity_KT,Predicted_Outbound_KT,Predicted_Inventory_KT")
+        # print(f"\n{warehouse_name} WAREHOUSE:")
+        # print("Date,Capacity_KT,Predicted_Outbound_KT,Predicted_Inventory_KT")
         
         for i, date in enumerate(data['dates']):
-            capacity = data['capacity'][i] if i < len(data['capacity']) else 'N/A'
-            outbound = data['predicted_outbound'][i] if i < len(data['predicted_outbound']) else 'N/A'
-            inventory = data['predicted_inventory'][i] if i < len(data['predicted_inventory']) else 'N/A'
-            print(f"{date},{capacity},{outbound},{inventory}")
+            capacity = data['capacity'][i] if i < len(data['capacity']) else None
+            outbound = data['predicted_outbound'][i] if i < len(data['predicted_outbound']) else None
+            inventory = data['predicted_inventory'][i] if i < len(data['predicted_inventory']) else None
+            
+            # Add to DataFrame collection
+            all_rows.append({
+                'Warehouse': warehouse_name,
+                'Date': date,
+                'Capacity_KT': capacity,
+                'Predicted_Outbound_KT': outbound,
+                'Predicted_Inventory_KT': inventory
+            })
+            
+            # Print for display
+            capacity_str = capacity if capacity is not None else 'N/A'
+            outbound_str = outbound if outbound is not None else 'N/A'
+            inventory_str = inventory if inventory is not None else 'N/A'
+            # print(f"{date},{capacity_str},{outbound_str},{inventory_str}")
+    
+    # Create DataFrame from collected data
+    tabular_df = pd.DataFrame(all_rows)
+    # print(f"\nCreated DataFrame with {len(tabular_df)} rows")
     
     # Format 3: Summary statistics
-    print("\n=== SUMMARY STATISTICS ===")
-    for warehouse_name, data in warehouses_data.items():
-        print(f"\n{warehouse_name} WAREHOUSE SUMMARY:")
+    # print("\n=== SUMMARY STATISTICS ===")
+    # for warehouse_name, data in warehouses_data.items():
+    #     print(f"\n{warehouse_name} WAREHOUSE SUMMARY:")
         
-        # Capacity stats
-        capacity_values = [x for x in data['capacity'] if x is not None]
-        if capacity_values:
-            print(f"  Capacity: Min={min(capacity_values):.1f} KT, Max={max(capacity_values):.1f} KT, Avg={sum(capacity_values)/len(capacity_values):.1f} KT")
+    #     # Capacity stats
+    #     capacity_values = [x for x in data['capacity'] if x is not None]
+    #     if capacity_values:
+    #         print(f"  Capacity: Min={min(capacity_values):.1f} KT, Max={max(capacity_values):.1f} KT, Avg={sum(capacity_values)/len(capacity_values):.1f} KT")
         
-        # Outbound stats
-        outbound_values = [x for x in data['predicted_outbound'] if x is not None]
-        if outbound_values:
-            print(f"  Outbound: Min={min(outbound_values):.1f} KT, Max={max(outbound_values):.1f} KT, Avg={sum(outbound_values)/len(outbound_values):.1f} KT")
-            print(f"  Total Annual Outbound: {sum(outbound_values):.1f} KT")
+    #     # Outbound stats
+    #     outbound_values = [x for x in data['predicted_outbound'] if x is not None]
+    #     if outbound_values:
+    #         print(f"  Outbound: Min={min(outbound_values):.1f} KT, Max={max(outbound_values):.1f} KT, Avg={sum(outbound_values)/len(outbound_values):.1f} KT")
+    #         print(f"  Total Annual Outbound: {sum(outbound_values):.1f} KT")
         
-        # Inventory stats
-        inventory_values = [x for x in data['predicted_inventory'] if x is not None]
-        if inventory_values:
-            print(f"  Inventory: Min={min(inventory_values):.1f} KT, Max={max(inventory_values):.1f} KT, Avg={sum(inventory_values)/len(inventory_values):.1f} KT")
+    #     # Inventory stats
+    #     inventory_values = [x for x in data['predicted_inventory'] if x is not None]
+    #     if inventory_values:
+    #         print(f"  Inventory: Min={min(inventory_values):.1f} KT, Max={max(inventory_values):.1f} KT, Avg={sum(inventory_values)/len(inventory_values):.1f} KT")
+    
+    return tabular_df
 
 def save_to_csv(warehouses_data, output_file='forecast_data.csv'):
     """
@@ -126,17 +151,26 @@ def save_to_csv(warehouses_data, output_file='forecast_data.csv'):
     print(f"\nData saved to {output_file}")
     return df
 
+def extract_from_xlsx(file_path = './utils/data/Forecast.xlsx'):
+    """
+    Extract date headers from the Excel file.
+    """
+    warehouses_data = read_forecast_excel(file_path)
+    df = format_for_llm(warehouses_data)
+    
+    return df
+
 # Main execution
 if __name__ == "__main__":
     # Replace 'Forecast.xlsx' with your file path
-    file_path = 'Forecast.xlsx'
+    file_path = './agent/query_tools/Forecast.xlsx'
     
     try:
         # Read and parse the Excel file
         warehouses_data = read_forecast_excel(file_path)
         
         # Display in LLM-friendly formats
-        format_for_llm(warehouses_data)
+        df = format_for_llm(warehouses_data)
         
         # Save to CSV for further analysis
         df = save_to_csv(warehouses_data)
