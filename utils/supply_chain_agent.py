@@ -15,6 +15,7 @@ from typing import Dict, Any, List, TypedDict, Annotated
 
 from langchain.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferWindowMemory
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
@@ -63,9 +64,21 @@ class SupplyChainAgent:
                 logger.error(f"Agent initialization failed: {error_msg}")
                 raise ValueError(error_msg)
             
+            # _llm = ChatOpenAI(
+            #     openai_api_key="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",
+            #     openai_api_base="https://openrouter.ai/api/v1",
+            #     model_name="openai/gpt-4o-mini",
+            #     temperature=0.0,
+            #     top_p=0.9,
+            #     frequency_penalty=0.0,
+            #     presence_penalty=0.0
+            # )
+
+            # self.llm = _llm
+
             # Initialize LLM
             self.llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model="gemini-2.0-flash",
                 google_api_key=self.google_api_key,
                 temperature=0.0,
                 verbose=True
@@ -175,144 +188,6 @@ class SupplyChainAgent:
             logger.error(f"Database connection failed: {e}")
             raise
     
-    def _setup_tools(self):
-        @tool
-        def analyze_supply_chain_data(query: str) -> Dict[str, Any]:
-            """Analyze supply chain data using SQL queries. Returns SQL, DataFrame, and natural language answer."""
-            
-            start_time = time.time()
-            logger.info(f"Starting supply chain data analysis: {query[:100]}...")
-            
-            try:
-                # Clear previous query cache
-                self.db.clear_query_cache()
-                
-                # Enhanced system prompt for SQL agent with business context
-                system_prefix = """
-You are an expert supply chain data analyst with access to a PostgreSQL database containing:
-
-Tables:
-- material_master: Material information (material_name, polymer_type, shelf_life_in_month, downgrade_value_lost_percent)
-- inventory: Current stock levels (balance_as_of_date, plant_name, material_name, batch_number, unrestricted_stock, stock_unit, stock_sell_value, currency)
-- inbound: Incoming shipments (inbound_date, plant_name, material_name, net_quantity_mt)
-- outbound: Outgoing shipments (outbound_date, plant_name, material_name, customer_number, mode_of_transport, net_quantity_mt)
-- operation_costs: Storage and transfer costs (operation_category, cost_type, entity_name, entity_type, cost_amount, cost_unit, container_capacity_mt, currency)
-
-Key Business Rules:
-- Stock quantities are in KG for inventory, MT for inbound/outbound
-- Different plants use different currencies (CNY for China, SGD for Singapore)
-- Batch numbers track specific material lots
-- Materials have shelf life and degradation rates
-
-Always provide actionable insights and consider business context in your analysis.
-Your answer must end with smile emoji
-"""
-                
-                # Create SQL toolkit
-                toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
-                
-                # Create SQL agent with proper memory integration
-                try:
-                    agent = create_sql_agent(
-                        llm=self.llm,
-                        toolkit=toolkit,
-                        verbose=True,
-                        agent_type="openai-tools",  # Changed from zero-shot-react-description
-                        prefix=system_prefix,  # Use prefix parameter for openai-tools agent
-                        handle_parsing_errors=True,
-                        memory=self.memory  # Use proper LangChain memory
-                    )
-                except Exception as e:
-                    logger.error(f"SQL agent creation with memory failed, trying without memory: {e}")
-                    # Fallback without memory if it causes issues
-                    agent = create_sql_agent(
-                        llm=self.llm,
-                        toolkit=toolkit,
-                        verbose=True,
-                        agent_type="openai-tools",  # Changed from zero-shot-react-description
-                        prefix=system_prefix,  # Use prefix parameter for openai-tools agent
-                        handle_parsing_errors=True
-                    )
-                
-                # Use memory-aware invocation
-                result = agent.invoke({"input": query})["output"]
-                
-                # Get the captured SQL query and create DataFrame
-                query_info = self.db.get_last_query_info()
-                sql_query = query_info.get("query", "No SQL query captured")
-                
-                # Create DataFrame from the executed query if available
-                dataframe = None
-                if sql_query and sql_query != "No SQL query captured":
-                    try:
-                        # Execute the same query to get DataFrame
-                        dataframe = pd.read_sql_query(sql_query, self.db._engine)
-                        logger.debug(f"SQL query result captured with shape: {dataframe.shape}")
-                    except Exception as df_error:
-                        logger.error(f"DataFrame creation failed for SQL: {sql_query[:100]}... Error: {df_error}")
-                        # If DataFrame creation fails, still return the text result
-                        pass
-                
-                execution_time = time.time() - start_time
-                logger.info(f"Supply chain data analysis completed successfully in {execution_time:.2f}s")
-                
-                # Return structured response
-                return {
-                    "type": "text_with_sql_and_dataframe",
-                    "text": result,
-                    "sql_query": sql_query,
-                    "dataframe": dataframe
-                }
-                
-            except Exception as e:
-                execution_time = time.time() - start_time
-                logger.error(f"Supply chain data analysis failed in {execution_time:.2f}s: {e}")
-                
-                # Return error as text-only response
-                return {
-                    "type": "text",
-                    "content": f"Error analyzing data: {str(e)}"
-                }
-        
-        @tool 
-        def create_visualization(query: str) -> Dict[str, Any]:
-            """Create Plotly visualizations for supply chain data. Use this when users ask for charts, plots, or visual analysis."""
-            
-            start_time = time.time()
-            logger.info(f"Starting visualization creation: {query[:100]}...")
-            
-            try:
-                # Determine what type of visualization is needed
-                query_lower = query.lower()
-                
-                if any(word in query_lower for word in ['trend', 'time', 'monthly', 'daily', 'over time']):
-                    result = self._create_time_series_chart(query)
-                elif any(word in query_lower for word in ['top', 'highest', 'largest', 'ranking']):
-                    result = self._create_ranking_chart(query)
-                elif any(word in query_lower for word in ['inventory', 'stock', 'levels']):
-                    result = self._create_inventory_chart(query)
-                elif any(word in query_lower for word in ['cost', 'expense', 'storage', 'transfer']):
-                    result = self._create_cost_chart(query)
-                else:
-                    result = self._create_general_chart(query)
-                
-                execution_time = time.time() - start_time
-                
-                if result["type"] == "plotly":
-                    logger.info(f"Visualization created successfully: {result.get('description', 'unknown')}")
-                else:
-                    logger.error(f"Visualization creation failed: {result.get('message')}")
-                
-                logger.info(f"Visualization creation completed in {execution_time:.2f}s")
-                return result
-                
-            except Exception as e:
-                execution_time = time.time() - start_time
-                logger.error(f"Visualization creation failed in {execution_time:.2f}s: {e}")
-                return {"type": "error", "message": f"Error creating visualization: {str(e)}"}
-        
-        self.analyze_tool = analyze_supply_chain_data
-        self.visualize_tool = create_visualization
     
     def _create_time_series_chart(self, query: str) -> Dict[str, Any]:
         """Create time-series visualizations"""
@@ -581,9 +456,32 @@ Your answer must end with smile emoji
             # Create thread configuration for session persistence
             config = {"configurable": {"thread_id": thread_id}}
             
-            # Let the LLM agent decide which tools to use based on the query
-            messages = [HumanMessage(content=query)]
-            result = self.app.invoke({"messages": messages}, config)
+            # Get existing conversation history to append to
+            try:
+                existing_state = self.app.get_state(config)
+                existing_messages = existing_state.values.get("messages", []) if existing_state and existing_state.values else []
+            except:
+                existing_messages = []
+            
+            # Filter out incomplete tool calls to avoid the tool_use/tool_result mismatch
+            clean_messages = []
+            for msg in existing_messages:
+                # Skip messages that are tool calls without proper responses
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    # This is a tool call - skip it to avoid format issues
+                    continue
+                elif hasattr(msg, 'name') and msg.name:
+                    # This is a tool response - skip it too
+                    continue
+                else:
+                    # This is a regular message - keep it
+                    clean_messages.append(msg)
+            
+            # Add the new user message
+            clean_messages.append(HumanMessage(content=query))
+            
+            # Invoke with clean message history
+            result = self.app.invoke({"messages": clean_messages}, config)
             
             processing_time = time.time() - start_time
             
