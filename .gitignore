@@ -179,3 +179,4 @@ pyrightconfig.json
 CLAUDE.md
 instruction.md
 conversations.db*
+utils/sql_agent.py

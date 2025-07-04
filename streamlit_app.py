@@ -3,10 +3,36 @@ import os
 import glob
 from datetime import datetime
 from dotenv import load_dotenv
+import sqlparse
 from utils.supply_chain_agent import SupplyChainAgent
-from utils.logger import log_streamlit_event
+from agent.intent_agent import router_agent
+from agent.agent_flow import handle_router
+from agent.query_tools.monthly_throughput import analyst_thoughput
+from agent.query_tools.forecast import forecast_agent
+from agent.query_tools.notification import warehouse_capacity, calculate_capacity
+from loguru import logger
 
 load_dotenv()
+
+def format_sql_query(sql_query: str) -> str:
+    """Format SQL query for better readability using sqlparse"""
+    if not sql_query or sql_query == "No SQL query captured":
+        return sql_query
+    
+    try:
+        formatted = sqlparse.format(
+            sql_query,
+            reindent=True,
+            keyword_case='upper',
+            strip_comments=False,
+            strip_whitespace=True,
+            use_space_around_operators=True,
+            indent_tabs=False,
+            indent_width=2
+        )
+        return formatted.strip()
+    except Exception:
+        return sql_query
 
 def main():
     st.set_page_config(
@@ -32,9 +58,9 @@ def main():
         
         st.header("💡 Sample Questions")
         sample_questions = [
-            "Show inventory levels for all materials",
             "What are the top 5 materials by outbound volume?",
             "Plot monthly transaction trends",
+            "Give me the 5 latest snapshots of our inventory",
             "Which plants have the highest storage costs?",
             "Show me materials with low stock levels"
         ]
@@ -43,9 +69,19 @@ def main():
             if st.button(question, key=f"sample_{hash(question)}"):
                 st.session_state.user_input = question
         
+        st.header("📊 Quick Analytics")
+        if st.button("📈 Monthly Throughput Analysis"):
+            st.session_state.call_throughput = True
+        
+        if st.button("🔮 Warehouse Forecast Analysis"):
+            st.session_state.call_forecast = True
+        
+        if st.button("🚨 Capacity Notification Check"):
+            st.session_state.call_capacity = True
+        
         st.header("🔧 Settings")
         if st.button("🗑️ Clear Chat History"):
-            log_streamlit_event("clear_chat_history")
+            logger.info("Chat history cleared by user")
             st.session_state.messages = []
             if "agent" in st.session_state:
                 # Clear both LangChain and LangGraph memory
@@ -75,7 +111,12 @@ def main():
             st.subheader("Agent Status")
             if "agent" in st.session_state:
                 st.success("✅ Agent initialized")
-                st.info(f"Dataframes loaded: {len(st.session_state.agent.dataframes)}")
+                try:
+                    table_names = st.session_state.agent.db.get_usable_table_names()
+                    st.info(f"Database tables available: {len(table_names)}")
+                    st.text(f"Tables: {', '.join(table_names)}")
+                except:
+                    st.info("SQL database connected")
                 
                 # Show memory status
                 try:
@@ -122,7 +163,12 @@ def main():
             elif message["type"] == "plotly":
                 st.plotly_chart(message["content"], use_container_width=True, key=f"plotly_{idx}_{id(message)}")
             elif message["type"] == "dataframe":
-                st.dataframe(message["content"], use_container_width=True)
+                if message["content"] is not None and not message["content"].empty:
+                    st.dataframe(message["content"], use_container_width=True)
+            elif message["type"] == "sql_query":
+                if message["content"] and message["content"] != "No SQL query captured":
+                    with st.expander("🔍 SQL Query Used"):
+                        st.code(format_sql_query(message["content"]), language="sql")
     
     # Chat input
     user_input = st.chat_input("Ask me about your supply chain data...")
@@ -132,8 +178,162 @@ def main():
         user_input = st.session_state.user_input
         st.session_state.user_input = ""
     
+    # Handle throughput analysis button click
+    if "call_throughput" in st.session_state and st.session_state.call_throughput:
+        st.session_state.call_throughput = False
+        
+        # Add system message for throughput analysis
+        st.session_state.messages.append({
+            "role": "user", 
+            "type": "text", 
+            "content": "Monthly Throughput Analysis"
+        })
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown("Monthly Throughput Analysis")
+        
+        # Get throughput analysis
+        with st.chat_message("assistant"):
+            with st.spinner("🔄 Analyzing monthly throughput..."):
+                try:
+                    throughput_data = analyst_thoughput()
+                    
+                    # Convert to DataFrame for better display
+                    import pandas as pd
+                    df = pd.DataFrame(throughput_data)
+                    
+                    st.markdown("**Monthly Throughput Analysis Results:**")
+                    st.dataframe(df, use_container_width=True)
+                    
+                    # Store in message history
+                    st.session_state.messages.extend([
+                        {"role": "assistant", "type": "text", "content": "**Monthly Throughput Analysis Results:**"},
+                        {"role": "assistant", "type": "dataframe", "content": df}
+                    ])
+                    
+                    logger.info(f"Monthly throughput analysis completed with {len(throughput_data)} records")
+                    
+                except Exception as e:
+                    error_msg = f"❌ Error getting throughput analysis: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "type": "text", 
+                        "content": error_msg
+                    })
+                    logger.error(f"Throughput analysis error: {str(e)}")
+    
+    # Handle forecast analysis button click
+    if "call_forecast" in st.session_state and st.session_state.call_forecast:
+        st.session_state.call_forecast = False
+        
+        # Add system message for forecast analysis
+        st.session_state.messages.append({
+            "role": "user", 
+            "type": "text", 
+            "content": "Warehouse Forecast Analysis"
+        })
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown("Warehouse Forecast Analysis")
+        
+        # Get forecast analysis
+        with st.chat_message("assistant"):
+            with st.spinner("🔮 Analyzing warehouse forecast..."):
+                try:
+                    forecast_result = forecast_agent()
+                    
+                    # Since forecast_agent returns text, display it directly
+                    st.markdown("**Warehouse Forecast Analysis Results:**")
+                    if forecast_result:
+                        st.markdown(forecast_result)
+                        
+                        # Store in message history
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "type": "text", 
+                            "content": f"**Warehouse Forecast Analysis Results:**\n\n{forecast_result}"
+                        })
+                    else:
+                        st.info("Forecast analysis completed. Check the logs for detailed results.")
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "type": "text", 
+                            "content": "Forecast analysis completed. Check the logs for detailed results."
+                        })
+                    
+                    logger.info("Warehouse forecast analysis completed")
+                    
+                except Exception as e:
+                    error_msg = f"❌ Error getting forecast analysis: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "type": "text", 
+                        "content": error_msg
+                    })
+                    logger.error(f"Forecast analysis error: {str(e)}")
+    
+    # Handle capacity notification button click
+    if "call_capacity" in st.session_state and st.session_state.call_capacity:
+        st.session_state.call_capacity = False
+        
+        # Add system message for capacity check
+        st.session_state.messages.append({
+            "role": "user", 
+            "type": "text", 
+            "content": "Capacity Notification Check"
+        })
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown("Capacity Notification Check")
+        
+        # Get capacity analysis
+        with st.chat_message("assistant"):
+            with st.spinner("🚨 Checking warehouse capacity..."):
+                try:
+                    # Get warehouse capacity data
+                    df = warehouse_capacity()
+                    capacity_result = calculate_capacity(df)
+                    
+                    st.markdown("**Warehouse Capacity Notification Results:**")
+                    
+                    # Check if result is a DataFrame (problematic warehouses) or string (all good)
+                    if isinstance(capacity_result, str):
+                        st.success(f"✅ {capacity_result}")
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "type": "text", 
+                            "content": f"**Warehouse Capacity Notification Results:**\n\n✅ {capacity_result}"
+                        })
+                    else:
+                        # Show problematic warehouses
+                        st.warning("⚠️ **Capacity Alert!** The following warehouses have inventory at 80% or more of capacity:")
+                        st.dataframe(capacity_result, use_container_width=True)
+                        
+                        # Store in message history
+                        st.session_state.messages.extend([
+                            {"role": "assistant", "type": "text", "content": "**Warehouse Capacity Notification Results:**\n\n⚠️ **Capacity Alert!** The following warehouses have inventory at 80% or more of capacity:"},
+                            {"role": "assistant", "type": "dataframe", "content": capacity_result}
+                        ])
+                    
+                    logger.info(f"Capacity notification check completed")
+                    
+                except Exception as e:
+                    error_msg = f"❌ Error checking capacity: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "type": "text", 
+                        "content": error_msg
+                    })
+                    logger.error(f"Capacity check error: {str(e)}")
+    
     if user_input:
-        log_streamlit_event("user_query", {"query": user_input[:100]})
+        logger.info(f"User query: {user_input[:100]}")
         
         # Add user message
         st.session_state.messages.append({"role": "user", "type": "text", "content": user_input})
@@ -146,10 +346,22 @@ def main():
         with st.chat_message("assistant"):
             with st.spinner("🤔 Analyzing your data..."):
                 try:
-                    response = st.session_state.agent.process_query(
+                    # Get intent classification and route to appropriate agent
+                    intent = router_agent(user_input)
+                    # print(f"Intent is: {intent}")
+                    response_text = handle_router(
+                        intent, 
                         user_input, 
+                        chat_history=[], 
+                        supply_chain_agent=st.session_state.agent, 
                         thread_id=st.session_state.thread_id
                     )
+                    
+                    # Handle if response is already a dict (from supply chain agent)
+                    if isinstance(response_text, dict):
+                        response = response_text
+                    else:
+                        response = {"type": "text", "content": response_text}
                     
                     # Handle different response types
                     if response["type"] == "text":
@@ -159,7 +371,7 @@ def main():
                             "type": "text", 
                             "content": response["content"]
                         })
-                        log_streamlit_event("response_text", {"length": len(response["content"])})
+                        logger.info(f"Generated text response: {len(response['content'])} characters")
                     
                     elif response["type"] == "text_with_chart":
                         st.markdown(response["text"])
@@ -168,7 +380,7 @@ def main():
                             {"role": "assistant", "type": "text", "content": response["text"]},
                             {"role": "assistant", "type": "plotly", "content": response["chart"]}
                         ])
-                        log_streamlit_event("response_chart", {"text_length": len(response["text"])})
+                        logger.info(f"Generated chart response with text: {len(response['text'])} characters")
                     
                     elif response["type"] == "text_with_dataframe":
                         st.markdown(response["text"])
@@ -177,7 +389,31 @@ def main():
                             {"role": "assistant", "type": "text", "content": response["text"]},
                             {"role": "assistant", "type": "dataframe", "content": response["dataframe"]}
                         ])
-                        log_streamlit_event("response_dataframe", {"text_length": len(response["text"])})
+                        logger.info(f"Generated dataframe response with text: {len(response['text'])} characters")
+                    
+                    elif response["type"] == "text_with_sql_and_dataframe":
+                        # Display natural language answer
+                        st.markdown(response["text"])
+                        
+                        # Display DataFrame if available
+                        if response["dataframe"] is not None and not response["dataframe"].empty:
+                            st.subheader("📊 Raw Data Results")
+                            st.dataframe(response["dataframe"], use_container_width=True)
+                        
+                        # Display SQL query in expandable section
+                        if response["sql_query"] and response["sql_query"] != "No SQL query captured":
+                            with st.expander("🔍 SQL Query Used"):
+                                st.code(format_sql_query(response["sql_query"]), language="sql")
+                        
+                        # Store in message history
+                        st.session_state.messages.extend([
+                            {"role": "assistant", "type": "text", "content": response["text"]},
+                            {"role": "assistant", "type": "dataframe", "content": response["dataframe"]},
+                            {"role": "assistant", "type": "sql_query", "content": response["sql_query"]}
+                        ])
+                        dataframe_shape = response["dataframe"].shape if response["dataframe"] is not None else None
+                        sql_length = len(response["sql_query"]) if response["sql_query"] else 0
+                        logger.info(f"Generated SQL and dataframe response: {len(response['text'])} chars, shape {dataframe_shape}, SQL {sql_length} chars")
                     
                     elif response["type"] == "error":
                         st.error(f"❌ {response['content']}")
@@ -186,7 +422,7 @@ def main():
                             "type": "text", 
                             "content": f"❌ {response['content']}"
                         })
-                        log_streamlit_event("response_error", {"error": response['content']})
+                        logger.error(f"Response error: {response['content']}")
                         
                 except Exception as e:
                     error_msg = f"❌ An error occurred: {str(e)}"
@@ -196,7 +432,7 @@ def main():
                         "type": "text", 
                         "content": error_msg
                     })
-                    log_streamlit_event("streamlit_error", {"error": str(e)})
+                    logger.error(f"Streamlit error: {str(e)}")
 
 if __name__ == "__main__":
     main()

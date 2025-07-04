@@ -1,61 +1,85 @@
+"""
+Supply Chain Agent - Refactored Version
+
+This module contains the main SupplyChainAgent class with separated concerns:
+- Database connection logic moved to database.py
+- Tool definitions moved to tools.py
+- Cleaner, more maintainable code structure
+"""
 import os
+import time
+import sqlite3
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-import time
-import traceback
-from typing import Dict, Any, List
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableLambda
-from langchain_core.output_parsers import StrOutputParser
+from typing import Dict, Any, List, TypedDict, Annotated
+
 from langchain.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferWindowMemory
+from langchain_community.agent_toolkits.sql.base import create_sql_agent
+from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from typing import TypedDict, Annotated
 from dotenv import load_dotenv
 
-from .dataframe import transactions_master_df, inventory_master_df, storage_cost_df, transfer_cost_df
-from .logger import (
-    log_query, log_tool_call, log_tool_result, log_agent_response, 
-    log_error, log_dataframe_operation, log_visualization
-)
+# Import custom modules
+from .database import QueryCapturingSQLDatabase, create_database_connection
+from .tools import create_supply_chain_tools
+from loguru import logger
 
 load_dotenv()
+
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
 
+
 class SupplyChainAgent:
+    """
+    Main Supply Chain Analytics Agent
+    
+    Provides natural language interface to supply chain database with:
+    - SQL-powered data analysis
+    - Interactive visualizations
+    - Conversation memory
+    - Session persistence
+    """
+    
     def __init__(self):
         try:
-            log_agent_response("agent_init", 0, 0)
+            logger.info("Agent initialization started")
             
+            # Validate API key
             self.google_api_key = os.environ.get('GOOGLE_API_KEY')
             if not self.google_api_key:
                 error_msg = "GOOGLE_API_KEY environment variable is required"
-                log_error(ValueError(error_msg), {"component": "agent_init"})
+                logger.error(f"Agent initialization failed: {error_msg}")
                 raise ValueError(error_msg)
-            
+
+            # Initialize LLM
             self.llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-flash",
                 google_api_key=self.google_api_key,
                 temperature=0.0,
                 verbose=True
             )
             
-            self.dataframes = {
-                'transactions': transactions_master_df,
-                'inventory': inventory_master_df, 
-                'storage_costs': storage_cost_df,
-                'transfer_costs': transfer_cost_df
-            }
+            # Initialize database connection
+            self.db = create_database_connection()
+            
+            # Log database connection info
+            try:
+                table_names = self.db.get_usable_table_names()
+                logger.info(f"SQL connection initialized with {len(table_names)} tables")
+                for table in table_names:
+                    logger.debug(f"SQL table available: {table}")
+            except Exception as e:
+                logger.error(f"Database logging error: {e}")
             
             # Initialize LangChain memory for pandas agent
             self.memory = ConversationBufferWindowMemory(
@@ -66,178 +90,141 @@ class SupplyChainAgent:
             
             # Initialize LangGraph memory saver with SQLite persistence
             try:
-                # Use proper SQLite initialization pattern
                 import sqlite3
                 conn = sqlite3.connect("conversations.db", check_same_thread=False)
                 self.langgraph_memory = SqliteSaver(conn)
-                log_agent_response("sqlite_memory_initialized", 0, 0)
+                logger.info("SQLite memory initialized")
             except Exception as e:
                 # Fallback to in-memory storage
-                log_error(e, {"fallback": "using in-memory storage"})
+                logger.error(f"SQLite memory initialization failed, using in-memory storage: {e}")
                 self.langgraph_memory = MemorySaver()
             
-            # Log dataframe info
-            for name, df in self.dataframes.items():
-                log_dataframe_operation("load", name, df.shape)
+            # Initialize chart data memory for follow-up questions
+            self.chart_memory = {}  # Store recent chart data for follow-ups
+            self.max_stored_charts = 3  # Keep last 3 charts
             
+            # Setup tools and agent
             self._setup_tools()
             self._setup_agent()
             
-            log_agent_response("agent_init_complete", 0, 0)
+            logger.info("Agent initialization complete")
             
         except Exception as e:
-            log_error(e, {"component": "agent_init"})
+            logger.error(f"Agent initialization failed: {e}")
             raise
     
-    def _setup_tools(self):
-        @tool
-        def analyze_dataframe(query: str) -> str:
-            """Analyze supply chain data using pandas operations. Use this for data analysis questions."""
-            
-            start_time = time.time()
-            log_tool_call("analyze_dataframe", query)
-            
-            try:
-                data_dictionary_prefix = """
-You are a supply chain data analyst expert.
-You have access to pandas dataframes with supply chain data.
-The dataframes are available as df1, df2, df3, and df4.
-
-Dataframe mapping:
-- df1: transactions_master_df - Transaction log (inbound/outbound) with material details
-- df2: inventory_master_df - Monthly inventory snapshots with material details  
-- df3: storage_cost_df - Storage costs per MT per day by plant
-- df4: transfer_cost_df - Transfer costs per container by transport mode
-
-Important columns:
-- TRANSACTION_DATE: Transaction date
-- PLANT_NAME: Plant/warehouse name
-- MATERIAL_NAME: Specific product name
-- NET_QUANTITY_MT: Quantity in Metric Tons
-- TRANSACTION_TYPE: 'INBOUND' or 'OUTBOUND'
-- POLYMER_TYPE: Material category
-- BALANCE_AS_OF_DATE: Inventory snapshot date
-- UNRESTRICTED_STOCK: Available quantity
-- STOCK_SELL_VALUE: Inventory value
-- STORAGE_COST_PER_MT_DAY: Storage cost per MT per day
-- MODE_OF_TRANSPORT: Transportation method
-- TRANSFER_COST_PER_CONTAINER: Cost per container transfer
-
-IMPORTANT: Always use df1, df2, df3, df4 in your Python code. Do not redefine these variables.
-
-When you need to execute Python code, use the python_repl_ast tool.
-Format your response as:
-
-Thought: I need to analyze the data to answer this question.
-Action: python_repl_ast
-Action Input: <your_python_code_here>
-Observation: <result_will_appear_here>
-... (repeat until you have the final answer)
-Final Answer: <your_final_answer>
-                """
-                
-                # Create pandas agent with proper memory integration
-                try:
-                    agent = create_pandas_dataframe_agent(
-                        self.llm,
-                        [transactions_master_df, inventory_master_df, storage_cost_df, transfer_cost_df],
-                        prefix=data_dictionary_prefix,
-                        allow_dangerous_code=True,
-                        verbose=True,
-                        agent_type="zero-shot-react-description",
-                        handle_parsing_errors=True,
-                        memory=self.memory  # Use proper LangChain memory
-                    )
-                except Exception as e:
-                    log_error(e, {"fallback": "trying without memory"})
-                    # Fallback without memory if it causes issues
-                    agent = create_pandas_dataframe_agent(
-                        self.llm,
-                        [transactions_master_df, inventory_master_df, storage_cost_df, transfer_cost_df],
-                        prefix=data_dictionary_prefix,
-                        allow_dangerous_code=True,
-                        verbose=True,
-                        agent_type="zero-shot-react-description",
-                        handle_parsing_errors=True
-                    )
-                
-                # Use memory-aware invocation
-                result = agent.invoke({"input": query})["output"]
-                
-                execution_time = time.time() - start_time
-                log_tool_result("analyze_dataframe", "text", True)
-                log_tool_call("analyze_dataframe", query, execution_time)
-                
-                return result
-                
-            except Exception as e:
-                execution_time = time.time() - start_time
-                log_tool_result("analyze_dataframe", "error", False, str(e))
-                log_error(e, {"tool": "analyze_dataframe", "query": query})
-                return f"Error analyzing data: {str(e)}"
+    def store_chart_data(self, chart_type: str, dataframe, sql_query: str, description: str = ""):
+        """
+        Store chart data for follow-up questions
         
-        @tool 
-        def create_visualization(query: str) -> Dict[str, Any]:
-            """Create Plotly visualizations for supply chain data. Use this when users ask for charts, plots, or visual analysis."""
+        Args:
+            chart_type: Type of chart (e.g., 'monthly_trends', 'bar_chart')
+            dataframe: The pandas DataFrame used to create the chart
+            sql_query: The SQL query used to generate the data
+            description: Optional description of the chart
+        """
+        try:
+            import time
             
-            start_time = time.time()
-            log_tool_call("create_visualization", query)
+            chart_id = f"{chart_type}_{int(time.time())}"
             
-            try:
-                # Determine what type of visualization is needed
-                query_lower = query.lower()
-                
-                if any(word in query_lower for word in ['trend', 'time', 'monthly', 'daily', 'over time']):
-                    result = self._create_time_series_chart(query)
-                elif any(word in query_lower for word in ['top', 'highest', 'largest', 'ranking']):
-                    result = self._create_ranking_chart(query)
-                elif any(word in query_lower for word in ['inventory', 'stock', 'levels']):
-                    result = self._create_inventory_chart(query)
-                elif any(word in query_lower for word in ['cost', 'expense', 'storage', 'transfer']):
-                    result = self._create_cost_chart(query)
-                else:
-                    result = self._create_general_chart(query)
-                
-                execution_time = time.time() - start_time
-                
-                if result["type"] == "plotly":
-                    log_visualization(result.get("description", "unknown"), 0, True)
-                    log_tool_result("create_visualization", "plotly", True)
-                else:
-                    log_tool_result("create_visualization", "error", False, result.get("message"))
-                
-                log_tool_call("create_visualization", query, execution_time)
-                return result
-                
-            except Exception as e:
-                execution_time = time.time() - start_time
-                log_tool_result("create_visualization", "error", False, str(e))
-                log_error(e, {"tool": "create_visualization", "query": query})
-                return {"type": "error", "message": f"Error creating visualization: {str(e)}"}
-        
-        self.analyze_tool = analyze_dataframe
-        self.visualize_tool = create_visualization
+            chart_data = {
+                "id": chart_id,
+                "type": chart_type,
+                "dataframe": dataframe,
+                "sql_query": sql_query,
+                "description": description,
+                "timestamp": time.time(),
+                "row_count": len(dataframe) if dataframe is not None else 0,
+                "columns": list(dataframe.columns) if dataframe is not None else []
+            }
+            
+            # Store the chart data
+            self.chart_memory[chart_id] = chart_data
+            
+            # Keep only the most recent charts
+            if len(self.chart_memory) > self.max_stored_charts:
+                # Remove oldest chart
+                oldest_id = min(self.chart_memory.keys(), 
+                              key=lambda k: self.chart_memory[k]["timestamp"])
+                del self.chart_memory[oldest_id]
+            
+            logger.info(f"Stored chart data for {chart_type}: {len(dataframe) if dataframe is not None else 0} rows")
+        except Exception as e:
+            logger.error(f"Error storing chart data for {chart_type}: {e}")
+            return chart_id
+    def _create_database_connection(self):
+        """Create connection to Supabase PostgreSQL database"""
+        try:
+            supabase_url = os.environ.get("SUPABASE_URL")
+            supabase_password = os.environ.get("SUPABASE_DB_PASSWORD")
+            
+            if not supabase_url or not supabase_password:
+                raise ValueError("SUPABASE_URL and SUPABASE_DB_PASSWORD environment variables are required")
+            
+            # Extract project ID from Supabase URL
+            project_id = supabase_url.split("//")[1].split(".")[0]
+            
+            # PostgreSQL connection string for Supabase
+            db_uri = f"postgresql://postgres:{supabase_password}@db.{project_id}.supabase.co:5432/postgres"
+            
+            return QueryCapturingSQLDatabase.from_uri(db_uri)
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            raise
+    
     
     def _create_time_series_chart(self, query: str) -> Dict[str, Any]:
         """Create time-series visualizations"""
         try:
-            # Monthly transaction trends
-            df = transactions_master_df.copy()
-            df['TRANSACTION_DATE'] = pd.to_datetime(df['TRANSACTION_DATE'])
-            df['MONTH'] = df['TRANSACTION_DATE'].dt.to_period('M')
+            # SQL query for monthly transaction trends (lowercase columns)
+            sql_query = """
+            WITH combined_transactions AS (
+                SELECT 
+                    inbound_date as transaction_date,
+                    'INBOUND' as transaction_type,
+                    net_quantity_mt as net_quantity_mt
+                FROM inbound
+                UNION ALL
+                SELECT 
+                    outbound_date as transaction_date,
+                    'OUTBOUND' as transaction_type,
+                    net_quantity_mt as net_quantity_mt
+                FROM outbound
+            ),
+            monthly_data AS (
+                SELECT 
+                    DATE_TRUNC('month', transaction_date::DATE) as month,
+                    transaction_type,
+                    SUM(net_quantity_mt) as total_quantity
+                FROM combined_transactions
+                WHERE transaction_date IS NOT NULL
+                GROUP BY DATE_TRUNC('month', transaction_date::DATE), transaction_type
+                ORDER BY month, transaction_type
+            )
+            SELECT 
+                TO_CHAR(month, 'YYYY-MM') as month_str,
+                transaction_type,
+                total_quantity
+            FROM monthly_data;
+            """
             
-            monthly_data = df.groupby(['MONTH', 'TRANSACTION_TYPE'])['NET_QUANTITY_MT'].sum().reset_index()
-            monthly_data['MONTH'] = monthly_data['MONTH'].astype(str)
+            # Execute query and get results
+            df = pd.read_sql_query(sql_query, self.db._engine)
+            
+            if df.empty:
+                return {"type": "error", "message": "No transaction data found for time series"}
             
             fig = px.line(
-                monthly_data, 
-                x='MONTH', 
-                y='NET_QUANTITY_MT', 
-                color='TRANSACTION_TYPE',
+                df, 
+                x='month_str', 
+                y='total_quantity', 
+                color='transaction_type',
                 title='Monthly Transaction Trends',
-                labels={'NET_QUANTITY_MT': 'Quantity (MT)', 'MONTH': 'Month'}
+                labels={'total_quantity': 'Quantity (MT)', 'month_str': 'Month', 'transaction_type': 'Transaction Type'}
             )
             
+            fig.update_layout(xaxis_tickangle=-45)
             return {"type": "plotly", "chart": fig, "description": "Monthly transaction trends showing inbound vs outbound volumes"}
             
         except Exception as e:
@@ -247,125 +234,182 @@ Final Answer: <your_final_answer>
         """Create ranking/top N visualizations"""
         try:
             if 'material' in query.lower():
-                # Top materials by volume
-                df = transactions_master_df.groupby('MATERIAL_NAME')['NET_QUANTITY_MT'].sum().reset_index()
-                df = df.nlargest(10, 'NET_QUANTITY_MT')
+                # Top materials by volume (lowercase columns)
+                sql_query = """
+                WITH combined_transactions AS (
+                    SELECT 
+                        material_name, 
+                        net_quantity_mt 
+                    FROM inbound
+                    UNION ALL
+                    SELECT 
+                        material_name, 
+                        net_quantity_mt 
+                    FROM outbound
+                ),
+                material_totals AS (
+                    SELECT 
+                        material_name,
+                        SUM(net_quantity_mt) as total_volume
+                    FROM combined_transactions
+                    WHERE material_name IS NOT NULL AND net_quantity_mt IS NOT NULL
+                    GROUP BY material_name
+                    ORDER BY total_volume DESC
+                    LIMIT 10
+                )
+                SELECT material_name, total_volume FROM material_totals;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
                 
                 fig = px.bar(
                     df, 
-                    x='NET_QUANTITY_MT', 
-                    y='MATERIAL_NAME',
+                    x='total_volume', 
+                    y='material_name',
                     orientation='h',
                     title='Top 10 Materials by Total Volume',
-                    labels={'NET_QUANTITY_MT': 'Total Volume (MT)', 'MATERIAL_NAME': 'Material'}
+                    labels={'total_volume': 'Total Volume (MT)', 'material_name': 'Material'}
                 )
                 
             elif 'plant' in query.lower():
-                # Top plants by volume
-                df = transactions_master_df.groupby('PLANT_NAME')['NET_QUANTITY_MT'].sum().reset_index()
-                df = df.nlargest(10, 'NET_QUANTITY_MT')
+                # Top plants by volume (lowercase columns)
+                sql_query = """
+                WITH combined_transactions AS (
+                    SELECT 
+                        plant_name, 
+                        net_quantity_mt 
+                    FROM inbound
+                    UNION ALL
+                    SELECT 
+                        plant_name, 
+                        net_quantity_mt 
+                    FROM outbound
+                ),
+                plant_totals AS (
+                    SELECT 
+                        plant_name,
+                        SUM(net_quantity_mt) as total_volume
+                    FROM combined_transactions
+                    WHERE plant_name IS NOT NULL AND net_quantity_mt IS NOT NULL
+                    GROUP BY plant_name
+                    ORDER BY total_volume DESC
+                    LIMIT 10
+                )
+                SELECT plant_name, total_volume FROM plant_totals;
+                """
+                
+                df = pd.read_sql_query(sql_query, self.db._engine)
                 
                 fig = px.bar(
                     df, 
-                    x='PLANT_NAME', 
-                    y='NET_QUANTITY_MT',
+                    x='plant_name', 
+                    y='total_volume',
                     title='Top 10 Plants by Total Volume',
-                    labels={'NET_QUANTITY_MT': 'Total Volume (MT)', 'PLANT_NAME': 'Plant'}
+                    labels={'total_volume': 'Total Volume (MT)', 'plant_name': 'Plant'}
                 )
                 
             else:
-                # Default: top materials
-                df = transactions_master_df.groupby('MATERIAL_NAME')['NET_QUANTITY_MT'].sum().reset_index()
-                df = df.nlargest(10, 'NET_QUANTITY_MT')
+                # Default: top materials (lowercase columns)
+                sql_query = """
+                WITH combined_transactions AS (
+                    SELECT 
+                        material_name, 
+                        net_quantity_mt 
+                    FROM inbound
+                    UNION ALL
+                    SELECT 
+                        material_name, 
+                        net_quantity_mt 
+                    FROM outbound
+                ),
+                material_totals AS (
+                    SELECT 
+                        material_name,
+                        SUM(net_quantity_mt) as total_volume
+                    FROM combined_transactions
+                    WHERE material_name IS NOT NULL AND net_quantity_mt IS NOT NULL
+                    GROUP BY material_name
+                    ORDER BY total_volume DESC
+                    LIMIT 10
+                )
+                SELECT material_name, total_volume FROM material_totals;
+                """
                 
-                fig = px.bar(df, x='MATERIAL_NAME', y='NET_QUANTITY_MT', title='Top 10 Materials by Volume')
+                df = pd.read_sql_query(sql_query, self.db._engine)
+                
+                fig = px.bar(df, x='material_name', y='total_volume', title='Top 10 Materials by Volume')
+            
+            if df.empty:
+                return {"type": "error", "message": "No data found for ranking chart"}
             
             fig.update_layout(xaxis_tickangle=-45)
             return {"type": "plotly", "chart": fig, "description": "Ranking chart based on your query"}
             
         except Exception as e:
+            logger.error(f"Error creating ranking chart for query '{query}': {e}")
             return {"type": "error", "message": f"Error creating ranking chart: {str(e)}"}
     
-    def _create_inventory_chart(self, query: str) -> Dict[str, Any]:
-        """Create inventory-related visualizations"""
-        try:
-            df = inventory_master_df.copy()
-            
-            # Inventory levels by plant
-            plant_inventory = df.groupby('PLANT_NAME')['UNRESTRICTED_STOCK'].sum().reset_index()
-            
-            fig = px.pie(
-                plant_inventory, 
-                values='UNRESTRICTED_STOCK', 
-                names='PLANT_NAME',
-                title='Inventory Distribution by Plant'
-            )
-            
-            return {"type": "plotly", "chart": fig, "description": "Current inventory distribution across plants"}
-            
-        except Exception as e:
-            return {"type": "error", "message": f"Error creating inventory chart: {str(e)}"}
+    def get_latest_chart_data(self):
+        """Get the most recently stored chart data"""
+        if not self.chart_memory:
+            return None
+        
+        # Return the most recent chart
+        latest_id = max(self.chart_memory.keys(), 
+                       key=lambda k: self.chart_memory[k]["timestamp"])
+        return self.chart_memory[latest_id]
     
-    def _create_cost_chart(self, query: str) -> Dict[str, Any]:
-        """Create cost-related visualizations"""
-        try:
-            if 'storage' in query.lower():
-                df = storage_cost_df.copy()
-                
-                fig = px.bar(
-                    df, 
-                    x='PLANT_NAME', 
-                    y='STORAGE_COST_PER_MT_DAY',
-                    title='Storage Costs by Plant',
-                    labels={'STORAGE_COST_PER_MT_DAY': 'Cost per MT per Day', 'PLANT_NAME': 'Plant'}
-                )
-                
-            elif 'transfer' in query.lower():
-                df = transfer_cost_df.copy()
-                
-                fig = px.bar(
-                    df, 
-                    x='MODE_OF_TRANSPORT', 
-                    y='TRANSFER_COST_PER_CONTAINER',
-                    title='Transfer Costs by Transport Mode',
-                    labels={'TRANSFER_COST_PER_CONTAINER': 'Cost per Container', 'MODE_OF_TRANSPORT': 'Transport Mode'}
-                )
-                
-            else:
-                # Default storage costs
-                df = storage_cost_df.copy()
-                fig = px.bar(df, x='PLANT_NAME', y='STORAGE_COST_PER_MT_DAY', title='Storage Costs by Plant')
-            
-            fig.update_layout(xaxis_tickangle=-45)
-            return {"type": "plotly", "chart": fig, "description": "Cost analysis visualization"}
-            
-        except Exception as e:
-            return {"type": "error", "message": f"Error creating cost chart: {str(e)}"}
+    def get_chart_data_by_type(self, chart_type: str):
+        """Get the most recent chart data of a specific type"""
+        matching_charts = [
+            chart for chart in self.chart_memory.values() 
+            if chart["type"] == chart_type
+        ]
+        
+        if not matching_charts:
+            return None
+        
+        # Return the most recent of this type
+        return max(matching_charts, key=lambda c: c["timestamp"])
     
-    def _create_general_chart(self, query: str) -> Dict[str, Any]:
-        """Create general visualizations"""
-        try:
-            # Default: transaction type distribution
-            df = transactions_master_df['TRANSACTION_TYPE'].value_counts().reset_index()
-            df.columns = ['TRANSACTION_TYPE', 'COUNT']
-            
-            fig = px.pie(
-                df, 
-                values='COUNT', 
-                names='TRANSACTION_TYPE',
-                title='Transaction Type Distribution'
-            )
-            
-            return {"type": "plotly", "chart": fig, "description": "General overview of transaction types"}
-            
-        except Exception as e:
-            return {"type": "error", "message": f"Error creating general chart: {str(e)}"}
+    def has_recent_chart_data(self) -> bool:
+        """Check if there's any recent chart data available"""
+        return len(self.chart_memory) > 0
+    
+    def _setup_tools(self):
+        """Setup tools using the tools module"""
+        (
+            self.analyze_tool,
+            self.sql_tool,
+            self.bar_chart_tool,
+            self.line_chart_tool,
+            self.scatter_plot_tool,
+            self.histogram_tool,
+            self.monthly_trends_tool,
+            self.analyze_chart_data_tool
+        ) = create_supply_chain_tools(
+            db=self.db,
+            llm=self.llm,
+            memory=self.memory,
+            agent=self
+        )
     
     def _setup_agent(self):
         """Setup the LangGraph agent with proper memory management"""
+        tools = [
+            self.analyze_tool,
+            self.sql_tool,
+            self.bar_chart_tool,
+            self.line_chart_tool,
+            self.scatter_plot_tool,
+            self.histogram_tool,
+            self.monthly_trends_tool,
+            self.analyze_chart_data_tool
+        ]
+        
         agent_node = create_react_agent(
             model=self.llm,
-            tools=[self.analyze_tool, self.visualize_tool]
+            tools=tools,
         )
         
         graph = StateGraph(AgentState)
@@ -377,68 +421,187 @@ Final Answer: <your_final_answer>
         self.app = graph.compile(checkpointer=self.langgraph_memory)
     
     def process_query(self, query: str, thread_id: str = "default") -> Dict[str, Any]:
-        """Process user query with proper memory management"""
+        """
+        Process user query with proper memory management
+        
+        Args:
+            query: User's natural language query
+            thread_id: Session identifier for conversation persistence
+            
+        Returns:
+            Dict with response type, content, and optional chart/SQL data
+        """
         start_time = time.time()
-        log_query(query)
+        logger.info(f"Processing query: {query[:100]}...")
         
         try:
+            # Clear any previous query cache to avoid stale data
+            self.db.clear_query_cache()
+            
             # Create thread configuration for session persistence
             config = {"configurable": {"thread_id": thread_id}}
             
-            # Determine if this is a visualization request
-            visualization_keywords = ['plot', 'chart', 'graph', 'show', 'visualize', 'display']
-            is_viz_request = any(keyword in query.lower() for keyword in visualization_keywords)
+            # Get existing conversation history to append to
+            try:
+                existing_state = self.app.get_state(config)
+                existing_messages = existing_state.values.get("messages", []) if existing_state and existing_state.values else []
+            except:
+                existing_messages = []
             
-            if is_viz_request:
-                # Handle visualization requests directly
-                viz_result = self.visualize_tool.invoke(query)
-                if viz_result["type"] == "plotly":
-                    response = {
-                        "type": "text_with_chart",
-                        "text": f"Here's a visualization based on your request: {viz_result['description']}",
-                        "chart": viz_result["chart"]
-                    }
-                    processing_time = time.time() - start_time
-                    log_agent_response("text_with_chart", len(response["text"]), processing_time)
-                    
-                    # Store in LangChain memory for pandas agent context
-                    self.memory.save_context(
-                        {"input": query},
-                        {"output": response["text"]}
-                    )
-                    
-                    return response
+            # Filter out incomplete tool calls to avoid the tool_use/tool_result mismatch
+            clean_messages = []
+            for msg in existing_messages:
+                # Skip messages that are tool calls without proper responses
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    # This is a tool call - skip it to avoid format issues
+                    continue
+                elif hasattr(msg, 'name') and msg.name:
+                    # This is a tool response - skip it too
+                    continue
                 else:
-                    error_msg = viz_result.get("message", "Error creating visualization")
-                    processing_time = time.time() - start_time
-                    log_agent_response("error", len(error_msg), processing_time)
-                    return {"type": "error", "content": error_msg}
+                    # This is a regular message - keep it
+                    clean_messages.append(msg)
             
-            # For data analysis questions and conversation memory
+            # Add the new user message
+            clean_messages.append(HumanMessage(content=query))
+            
+            # Invoke with clean message history
+            result = self.app.invoke({"messages": clean_messages}, config)
+            
+            processing_time = time.time() - start_time
+            
+            # Extract final response text
+            final_message = result["messages"][-1]
+            response_text = final_message.content if hasattr(final_message, 'content') else str(final_message)
+            
+            # Check for tool calls in the conversation to extract charts and SQL data
+            chart_data = None
+            sql_query = "No SQL query captured"
+            dataframe = None
+            
+            # Debug: Log the full result structure
+            logger.debug(f"LangGraph returned {len(result['messages'])} messages")
+            
+            # Find the index of the current user message (the one we just sent)
+            user_message_index = -1
+            for i, msg in enumerate(result["messages"]):
+                if hasattr(msg, 'content') and msg.content == query:
+                    user_message_index = i
+                    break
+            
+            # Only look at messages AFTER the current user input
+            if user_message_index >= 0:
+                current_request_messages = result["messages"][user_message_index + 1:]
             else:
-                # Use LangGraph with persistent memory
-                response = self.app.invoke(
-                    {"messages": [HumanMessage(content=query)]},
-                    config=config
-                )
+                # Fallback: just look at the last few messages
+                current_request_messages = result["messages"][-4:] if len(result["messages"]) > 4 else result["messages"]
+            
+            logger.debug(f"Processing {len(current_request_messages)} messages from index {user_message_index}")
+            
+            for i, msg in enumerate(current_request_messages):
+                # Debug logging
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        logger.debug(f"Found tool call: {tc['name']}")
                 
-                final_answer = response["messages"][-1].content
-                processing_time = time.time() - start_time
-                log_agent_response("text", len(final_answer), processing_time)
-                
-                # Store in LangChain memory for pandas agent context
-                self.memory.save_context(
-                    {"input": query},
-                    {"output": final_answer}
-                )
-                
-                return {"type": "text", "content": final_answer}
+                # Check for analyze_supply_chain_data tool calls
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tool_call in msg.tool_calls:
+                        if tool_call['name'] == 'analyze_supply_chain_data':
+                            # Find the corresponding tool response
+                            if i + 1 < len(current_request_messages):
+                                next_msg = current_request_messages[i + 1]
+                                if hasattr(next_msg, 'content'):
+                                    try:
+                                        # The content might be a string representation of the dict
+                                        import ast
+                                        if isinstance(next_msg.content, str) and next_msg.content.startswith('{'):
+                                            tool_result = ast.literal_eval(next_msg.content)
+                                        else:
+                                            tool_result = next_msg.content
+                                        
+                                        if isinstance(tool_result, dict):
+                                            sql_query = tool_result.get('sql_query', 'No SQL query captured')
+                                            dataframe = tool_result.get('dataframe')
+                                    except:
+                                        # If parsing fails, try to get from database cache
+                                        query_info = self.db.get_last_query_info()
+                                        sql_query = query_info.get("query", "No SQL query captured")
+                                        if sql_query and sql_query != "No SQL query captured":
+                                            try:
+                                                import pandas as pd
+                                                dataframe = pd.read_sql_query(sql_query, self.db._engine)
+                                            except:
+                                                pass
+                        
+                        # Check for chart tool calls
+                        elif tool_call['name'] in ['create_bar_chart', 'create_line_chart', 'create_scatter_plot', 'create_histogram', 'plot_monthly_transaction_trends']:
+                            # Find the corresponding tool response
+                            if i + 1 < len(current_request_messages):
+                                next_msg = current_request_messages[i + 1]
+                                if hasattr(next_msg, 'content'):
+                                    logger.debug(f"Chart tool response type: {type(next_msg.content)}")
+                                    try:
+                                        import ast
+                                        if isinstance(next_msg.content, str) and next_msg.content.startswith('{'):
+                                            tool_result = ast.literal_eval(next_msg.content)
+                                            logger.debug(f"Parsed tool result type: {tool_result.get('type')}")
+                                            if isinstance(tool_result, dict) and tool_result.get('type') == 'plotly':
+                                                # Convert JSON back to Plotly figure
+                                                try:
+                                                    import plotly.io as pio
+                                                    chart_json = tool_result.get('chart')
+                                                    if isinstance(chart_json, str):
+                                                        chart_fig = pio.from_json(chart_json)
+                                                        tool_result['chart'] = chart_fig
+                                                    chart_data = tool_result
+                                                except Exception as chart_error:
+                                                    logger.error(f"Chart reconstruction error: {chart_error}")
+                                                    chart_data = tool_result  # Use as-is if conversion fails
+                                    except:
+                                        pass
+            
+            # Store in memory
+            self.memory.save_context(
+                {"input": query},
+                {"output": response_text}
+            )
+            
+            # Disabled auto-visualization - only create charts when explicitly requested
+            # chart_keywords = ['plot', 'chart', 'graph', 'trend', 'visuali']
+            # is_chart_request = any(keyword in query.lower() for keyword in chart_keywords)
+            
+            # Auto-visualization disabled - charts only created when user explicitly requests them
+            
+            # Return appropriate format based on what was found
+            if chart_data:
+                logger.info(f"Generated text with chart response: {len(response_text)} chars in {processing_time:.2f}s")
+                return {
+                    "type": "text_with_chart",
+                    "text": response_text,
+                    "chart": chart_data.get("chart"),
+                    "sql_query": sql_query,
+                    "dataframe": dataframe
+                }
+            elif dataframe is not None or sql_query != "No SQL query captured":
+                logger.info(f"Generated text with SQL and dataframe response: {len(response_text)} chars in {processing_time:.2f}s")
+                return {
+                    "type": "text_with_sql_and_dataframe",
+                    "text": response_text,
+                    "sql_query": sql_query,
+                    "dataframe": dataframe
+                }
+            else:
+                logger.info(f"Generated text response: {len(response_text)} chars in {processing_time:.2f}s")
+                return {
+                    "type": "text",
+                    "content": response_text
+                }
                 
         except Exception as e:
             processing_time = time.time() - start_time
             error_msg = f"Error processing query: {str(e)}"
-            log_error(e, {"query": query, "processing_time": processing_time})
-            log_agent_response("error", len(error_msg), processing_time)
+            logger.error(f"Query processing failed in {processing_time:.2f}s: {e}")
             return {"type": "error", "content": error_msg}
     
     def get_conversation_history(self, thread_id: str = "default") -> List[BaseMessage]:
@@ -448,7 +611,7 @@ Final Answer: <your_final_answer>
             state = self.app.get_state(config)
             return state.values.get("messages", [])
         except Exception as e:
-            log_error(e, {"method": "get_conversation_history", "thread_id": thread_id})
+            logger.error(f"Failed to get conversation history for thread {thread_id}: {e}")
             return []
     
     def clear_memory(self, thread_id: str = "default"):
@@ -457,9 +620,40 @@ Final Answer: <your_final_answer>
             # Clear LangChain memory
             self.memory.clear()
             
-            # Clear LangGraph state (note: MemorySaver doesn't have direct clear method)
-            # Memory will naturally expire or can be handled at the application level
-            log_agent_response("memory_cleared", 0, 0)
+            # Clear LangGraph state by updating with empty messages
+            config = {"configurable": {"thread_id": thread_id}}
+            
+            # Update the thread state with empty messages
+            self.app.update_state(config, {"messages": []})
+            
+            # Also clear chart memory
+            self.chart_memory.clear()
+            
+            # Clear the SQLite database completely to ensure no cross-session memory
+            try:
+                if hasattr(self.langgraph_memory, 'conn'):
+                    cursor = self.langgraph_memory.conn.cursor()
+                    
+                    # Get all tables in the database
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = cursor.fetchall()
+                    
+                    # Clear all tables that exist
+                    cleared_tables = []
+                    for table in tables:
+                        table_name = table[0]
+                        try:
+                            cursor.execute(f"DELETE FROM {table_name}")
+                            cleared_tables.append(table_name)
+                        except Exception as table_error:
+                            logger.debug(f"Could not clear table {table_name}: {table_error}")
+                    
+                    self.langgraph_memory.conn.commit()
+                    logger.info(f"SQLite conversation database cleared ({len(cleared_tables)} tables)")
+            except Exception as db_error:
+                logger.warning(f"Could not clear SQLite database: {db_error}")
+            
+            logger.info(f"Memory cleared successfully for thread {thread_id}")
             
         except Exception as e:
-            log_error(e, {"method": "clear_memory", "thread_id": thread_id})
+            logger.error(f"Failed to clear memory for thread {thread_id}: {e}")
