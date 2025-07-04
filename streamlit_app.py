@@ -5,6 +5,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 import sqlparse
 from utils.supply_chain_agent import SupplyChainAgent
+from agent.intent_agent import router_agent
+from agent.agent_flow import handle_router
 from loguru import logger
 
 load_dotenv()
@@ -177,10 +179,22 @@ def main():
         with st.chat_message("assistant"):
             with st.spinner("🤔 Analyzing your data..."):
                 try:
-                    response = st.session_state.agent.process_query(
+                    # Get intent classification and route to appropriate agent
+                    intent = router_agent(user_input)
+                    # print(f"Intent is: {intent}")
+                    response_text = handle_router(
+                        intent, 
                         user_input, 
+                        chat_history=[], 
+                        supply_chain_agent=st.session_state.agent, 
                         thread_id=st.session_state.thread_id
                     )
+                    
+                    # Handle if response is already a dict (from supply chain agent)
+                    if isinstance(response_text, dict):
+                        response = response_text
+                    else:
+                        response = {"type": "text", "content": response_text}
                     
                     # Handle different response types
                     if response["type"] == "text":
