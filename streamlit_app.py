@@ -3,10 +3,31 @@ import os
 import glob
 from datetime import datetime
 from dotenv import load_dotenv
+import sqlparse
 from utils.supply_chain_agent import SupplyChainAgent
 from utils.logger import log_streamlit_event
 
 load_dotenv()
+
+def format_sql_query(sql_query: str) -> str:
+    """Format SQL query for better readability using sqlparse"""
+    if not sql_query or sql_query == "No SQL query captured":
+        return sql_query
+    
+    try:
+        formatted = sqlparse.format(
+            sql_query,
+            reindent=True,
+            keyword_case='upper',
+            strip_comments=False,
+            strip_whitespace=True,
+            use_space_around_operators=True,
+            indent_tabs=False,
+            indent_width=2
+        )
+        return formatted.strip()
+    except Exception:
+        return sql_query
 
 def main():
     st.set_page_config(
@@ -132,7 +153,7 @@ def main():
             elif message["type"] == "sql_query":
                 if message["content"] and message["content"] != "No SQL query captured":
                     with st.expander("🔍 SQL Query Used"):
-                        st.code(message["content"], language="sql")
+                        st.code(format_sql_query(message["content"]), language="sql")
     
     # Chat input
     user_input = st.chat_input("Ask me about your supply chain data...")
@@ -201,7 +222,7 @@ def main():
                         # Display SQL query in expandable section
                         if response["sql_query"] and response["sql_query"] != "No SQL query captured":
                             with st.expander("🔍 SQL Query Used"):
-                                st.code(response["sql_query"], language="sql")
+                                st.code(format_sql_query(response["sql_query"]), language="sql")
                         
                         # Store in message history
                         st.session_state.messages.extend([
