@@ -567,42 +567,11 @@ class SupplyChainAgent:
                 {"output": response_text}
             )
             
-            # Check if this was a chart request by looking for chart-related keywords and tool calls
-            chart_keywords = ['plot', 'chart', 'graph', 'trend', 'visuali']
-            is_chart_request = any(keyword in query.lower() for keyword in chart_keywords)
+            # Disabled auto-visualization - only create charts when explicitly requested
+            # chart_keywords = ['plot', 'chart', 'graph', 'trend', 'visuali']
+            # is_chart_request = any(keyword in query.lower() for keyword in chart_keywords)
             
-            # If it's a chart request but we didn't extract chart data, try calling the tool directly
-            # BUT only if we don't already have SQL/dataframe from analyze_supply_chain_data
-            if is_chart_request and not chart_data and sql_query == "No SQL query captured":
-                logger.debug("Attempting direct chart call")
-                if 'monthly' in query.lower() and ('trend' in query.lower() or 'transaction' in query.lower()):
-                    try:
-                        direct_chart = self.monthly_trends_tool.invoke({})
-                        if direct_chart.get('type') == 'plotly':
-                            # Convert JSON to Plotly figure
-                            import plotly.io as pio
-                            chart_json = direct_chart.get('chart')
-                            if isinstance(chart_json, str):
-                                chart_fig = pio.from_json(chart_json)
-                                chart_data = {
-                                    "type": "plotly",
-                                    "chart": chart_fig,
-                                    "description": direct_chart.get("description", "Monthly trends chart")
-                                }
-                                
-                                # Also get the SQL query and dataframe from the tool execution
-                                query_info = self.db.get_last_query_info()
-                                if query_info.get("query"):
-                                    sql_query = query_info["query"]
-                                    try:
-                                        import pandas as pd
-                                        dataframe = pd.read_sql_query(sql_query, self.db._engine)
-                                    except Exception as df_error:
-                                        logger.error(f"Direct chart dataframe error: {df_error}")
-                                
-                                logger.debug("Direct chart call successful")
-                    except Exception as e:
-                        logger.error(f"Direct chart call error: {e}")
+            # Auto-visualization disabled - charts only created when user explicitly requests them
             
             # Return appropriate format based on what was found
             if chart_data:

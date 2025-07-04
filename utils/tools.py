@@ -112,9 +112,10 @@ KEY ANALYSIS AREAS:
 - Customer demand patterns and forecasting accuracy
 
 CHART WORKFLOW:
-1. When user requests visualizations, first use analyze_supply_chain_data
-2. Then use appropriate chart tool with data_query='use_last'
-3. Never create new SQL for chart tools - reuse analyzed data
+1. Only create charts when user explicitly requests visualization (words like "plot", "chart", "graph", "show me a chart")
+2. When user requests visualizations, first use analyze_supply_chain_data
+3. Then use appropriate chart tool with data_query='use_last'
+4. Never create new SQL for chart tools - reuse analyzed data
 
 FOLLOW-UP EFFICIENCY:
 - For chart follow-up questions, use analyze_existing_chart_data tool
